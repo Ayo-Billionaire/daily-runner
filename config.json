@@ -1,0 +1,62 @@
+{
+  "start_date": "2026-11-17",
+  "ramp": [
+    [
+      0,
+      20
+    ],
+    [
+      7,
+      30
+    ],
+    [
+      14,
+      40
+    ],
+    [
+      21,
+      50
+    ]
+  ],
+  "weekdays_only": true,
+  "window_utc": [
+    "13:00",
+    "22:30"
+  ],
+  "slots_utc": [
+    "13:04",
+    "13:31",
+    "13:57",
+    "14:26",
+    "14:49",
+    "15:18",
+    "15:44",
+    "16:13",
+    "16:37",
+    "17:06",
+    "17:33",
+    "17:58",
+    "18:27",
+    "18:51",
+    "19:19",
+    "19:46",
+    "20:12",
+    "20:41",
+    "21:07",
+    "21:36"
+  ],
+  "gap_seconds": [
+    60,
+    180
+  ],
+  "low_supply_days": 3,
+  "platforms_enabled": [
+    "instagram",
+    "facebook"
+  ],
+  "max_coaches_per_run": 3,
+  "cap_note": "ramp numbers are coaches a day (IG+FB count as one). Each ramp step needs 7 clean days: a Meta warning pauses 3 days and drops back one step (state ramp shift); a 2nd warning within 14 days pauses until the owner says go.",
+  "max_messages_per_run": 3,
+  "second_platform_after_hours": 3,
+  "pause_days_on_warning": 3
+}

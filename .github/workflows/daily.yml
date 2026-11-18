@@ -1,0 +1,52 @@
+name: daily
+on:
+  # Started by the Cloudflare Worker clock (clock/worker.js).
+  workflow_dispatch:
+    inputs:
+      runner: { description: 'machine label', default: '' }
+      job: { description: 'sync or summary', default: 'sync' }
+permissions:
+  contents: write
+concurrency:
+  group: runner
+  cancel-in-progress: false
+defaults:
+  run:
+    shell: bash
+jobs:
+  run:
+    # PUBLIC REPO: only PUBLIC: lines reach the log; the rest goes to the encrypted artifact.
+    runs-on: ${{ inputs.runner || vars.RUNNER || 'ubuntu-24.04' }}
+    timeout-minutes: 10
+    env:
+      AIRTABLE_TOKEN: ${{ secrets.AIRTABLE_TOKEN }}
+      RESEND_API_KEY: ${{ secrets.RESEND_API_KEY }}
+      STATE_KEY: ${{ secrets.STATE_KEY }}
+      PRIVATE_CONFIG: ${{ secrets.PRIVATE_CONFIG }}
+    steps:
+      - uses: actions/checkout@v4
+      - run: git config user.name "runner" && git config user.email "runner@users.noreply.github.com"
+      - uses: actions/setup-python@v5
+        with: { python-version: '3.12' }
+      - run: pip install -q cryptography==43.0.3 > /dev/null 2>&1
+      - name: Run
+        working-directory: dmsender
+        run: |
+          case "${{ inputs.job }}" in sync|summary) ;; *) echo "bad job"; exit 1;; esac
+          set +e
+          python "${{ inputs.job }}.py" > ../run.log 2>&1
+          RC=$?
+          set -e
+          grep '^PUBLIC:' ../run.log || true
+          exit $RC
+      - name: Encrypt log
+        if: always()
+        working-directory: dmsender
+        run: python pack.py > /dev/null 2>&1 || echo "pack failed"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with: { name: private, path: private.enc, if-no-files-found: ignore, retention-days: 7 }
+      - name: Email on any failure
+        if: failure()
+        working-directory: dmsender
+        run: python3 -c "from common import email, run_link; email('DM sender ERROR: daily job failed', 'The daily sync or summary failed. Full log is in the encrypted artifact. Run: ' + run_link())" > /dev/null 2>&1

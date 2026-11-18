@@ -1,0 +1,9 @@
+shots/
+__pycache__/
+.env
+private_config.json
+*.log
+private.enc
+unpacked/
+ts-pkg/
+state/*.json

@@ -1,0 +1,93 @@
+name: send
+on:
+  # Started by the Cloudflare Worker clock (clock/worker.js) at the slots in config.json.
+  workflow_dispatch:
+    inputs:
+      runner: { description: 'machine label', default: '' }
+      limit: { description: 'How many to send (manual test)', default: '1' }
+      only: { description: 'instagram, facebook, or blank for both', default: '' }
+      dry_run: { description: 'true = list only, send nothing', default: 'true' }
+      force: { description: 'true = ignore day/window/cap', default: 'false' }
+permissions:
+  contents: write
+concurrency:
+  group: runner
+  cancel-in-progress: false
+defaults:
+  run:
+    shell: bash
+jobs:
+  send:
+    # PUBLIC REPO: the log shows only lines starting PUBLIC: (counts). The full log and screenshots
+    # go into private.enc, encrypted with STATE_KEY. Never echo names, links or config here.
+    runs-on: ${{ inputs.runner || vars.RUNNER || 'ubuntu-24.04' }}
+    timeout-minutes: 14
+    env:
+      AIRTABLE_TOKEN: ${{ secrets.AIRTABLE_TOKEN }}
+      RESEND_API_KEY: ${{ secrets.RESEND_API_KEY }}
+      STATE_KEY: ${{ secrets.STATE_KEY }}
+      PRIVATE_CONFIG: ${{ secrets.PRIVATE_CONFIG }}
+    steps:
+      - uses: actions/checkout@v4
+      - run: git config user.name "runner" && git config user.email "runner@users.noreply.github.com"
+      - uses: actions/setup-python@v5
+        with: { python-version: '3.12', cache: 'pip' }
+      - uses: actions/cache@v4
+        with: { path: ~/.cache/ms-playwright, key: pw-1.60.0-chromium }
+      - run: (pip install -q -r requirements.txt && python -m playwright install --with-deps chromium) > /tmp/setup.log 2>&1 || { tail -5 /tmp/setup.log; exit 1; }
+      - name: Cache Tailscale
+        if: ${{ inputs.dry_run != 'true' }}
+        uses: actions/cache@v4
+        with: { path: ts-pkg, key: tailscale-1.104.7-amd64 }
+      - name: Connect through the exit node
+        if: ${{ inputs.dry_run != 'true' }}
+        env:
+          TS_AUTHKEY: ${{ secrets.TS_AUTHKEY }}
+        run: |
+          set -e
+          EXIT=$(python3 -c "import json,os;print(json.loads(os.environ['PRIVATE_CONFIG'])['exit_node'])")
+          WANT=$(python3 -c "import json,os;print(json.loads(os.environ['PRIVATE_CONFIG'])['exit_country'])")
+          echo "::add-mask::$EXIT"
+          V=tailscale_1.104.7_amd64.tgz
+          mkdir -p ts-pkg
+          [ -s "ts-pkg/$V" ] || curl -fsSL --retry 6 --retry-delay 20 --retry-all-errors -o "ts-pkg/$V" "https://pkgs.tailscale.com/stable/$V"
+          tar xzf "ts-pkg/$V"
+          D="$PWD/${V%.tgz}"
+          "$D/tailscaled" --tun=userspace-networking --socks5-server=localhost:1055 --state=mem: --socket=/tmp/ts.sock > /tmp/tailscaled.log 2>&1 &
+          sleep 4
+          "$D/tailscale" --socket=/tmp/ts.sock up --authkey="$TS_AUTHKEY" --hostname=runner-gh --exit-node="$EXIT" > /tmp/tsup.log 2>&1 || { echo "tailscale up failed"; exit 1; }
+          sleep 4
+          GOT=""
+          for U in "https://api.country.is|country" "https://ipinfo.io/json|country" "https://ipapi.co/json/|country_code" "http://ip-api.com/json/|countryCode"; do
+            URL="${U%%|*}"; KEY="${U##*|}"
+            GOT=$(curl -fsS --max-time 20 --socks5-hostname localhost:1055 "$URL" 2>/dev/null | python3 -c "import sys,json;print(json.load(sys.stdin).get('$KEY',''))" 2>/dev/null || true)
+            [ -n "$GOT" ] && break
+          done
+          case "$GOT" in "$WANT"*) echo "exit node OK";; *) echo "NOT through the exit node"; exit 1;; esac
+          { "$D/tailscale" --socket=/tmp/ts.sock ping -c 3 "$EXIT" || true; } > /tmp/tsping.log 2>&1
+          echo "DM_PROXY=socks5://localhost:1055" >> "$GITHUB_ENV"
+      - name: Send
+        working-directory: dmsender
+        run: |
+          ARGS="--limit ${{ inputs.limit }}"
+          [ -n "${{ inputs.only }}" ] && ARGS="$ARGS --only ${{ inputs.only }}"
+          [ "${{ inputs.dry_run }}" = "true" ] && ARGS="$ARGS --dry-run"
+          [ "${{ inputs.force }}" = "true" ] && ARGS="$ARGS --force"
+          cat /tmp/tsping.log > ../run.log 2>/dev/null || true
+          set +e
+          python send.py $ARGS >> ../run.log 2>&1
+          RC=$?
+          set -e
+          grep '^PUBLIC:' ../run.log || true
+          exit $RC
+      - name: Encrypt log and screenshots
+        if: always()
+        working-directory: dmsender
+        run: python pack.py > /dev/null 2>&1 || echo "pack failed"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with: { name: private, path: private.enc, if-no-files-found: ignore, retention-days: 7 }
+      - name: Email on any failure
+        if: failure()
+        working-directory: dmsender
+        run: python3 -c "from common import email, run_link; email('DM sender ERROR: send run failed', 'A step in the sending run failed. Full log is in the encrypted artifact (private.enc). Run: ' + run_link())" > /dev/null 2>&1
