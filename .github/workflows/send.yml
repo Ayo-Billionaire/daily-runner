@@ -90,4 +90,5 @@ jobs:
       - name: Email on any failure
         if: failure()
         working-directory: dmsender
-        run: python3 -c "from common import email, run_link; email('DM sender ERROR: send run failed', 'A step in the sending run failed. Full log is in the encrypted artifact (private.enc). Run: ' + run_link())" > /dev/null 2>&1
+        run: |
+          python3 -c "from common import email, run_link; email('DM sender ERROR: send run failed', 'A step in the sending run failed. Full log is in the encrypted artifact (private.enc). Run: ' + run_link())" > /dev/null 2>&1
