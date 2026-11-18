@@ -428,6 +428,8 @@ def main():
         n = a.limit if a.force else min(a.limit, n)
     enabled = CFG.get('platforms_enabled', ['instagram', 'facebook'])
     items = pick([i for i in q['items'] if i['key'] not in sent and (a.force or i['platform'] in enabled) and (not a.only or i['platform'] == a.only)], sent, n)
+    if a.limit is not None:
+        items = items[:a.limit]  # a manual limit caps ALL messages, follow-up platforms included (18 Nov test sent 2 on limit 1)
     print(f'cap {cap} coaches, new coaches today {done}, this run {len(items)} messages')
     print(f'PUBLIC: cap {cap}, started today {done}, this run {len(items)}' + (' (dry run)' if a.dry_run else ''))
     if not items:
