@@ -337,6 +337,15 @@ def send_one(page, item):
     time.sleep(random.uniform(1.0, 2.5))
     page.keyboard.press('Enter')
     time.sleep(random.uniform(4, 7))
+    # 18 Nov 2026: over the phone relay Facebook still showed "Sending" at the screenshot. Wait for it to clear
+    # (up to 45 s) and never record a message Meta says failed.
+    for _ in range(15):
+        if page.get_by_text('Sending', exact=True).count() == 0:
+            break
+        time.sleep(3)
+    for bad in ('Failed to send', 'Not sent', "Couldn't send"):
+        if page.get_by_text(bad, exact=False).count() > 0:
+            raise Skip(f'Meta showed "{bad}" after pressing send')
     guard(page, 'after send')
     left = box.inner_text().strip() if box.is_visible() else ''
     if item['platform'] == 'facebook':
