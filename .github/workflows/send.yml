@@ -29,6 +29,7 @@ jobs:
       PRIVATE_CONFIG: ${{ secrets.PRIVATE_CONFIG }}
     steps:
       - uses: actions/checkout@v4
+        with: { ref: main }  # a queued run must start from the LATEST state, not the commit it was dispatched on
       - run: git config user.name "runner" && git config user.email "runner@users.noreply.github.com"
       - uses: actions/setup-python@v5
         with: { python-version: '3.12', cache: 'pip' }
