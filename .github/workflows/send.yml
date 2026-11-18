@@ -21,7 +21,7 @@ jobs:
     # PUBLIC REPO: the log shows only lines starting PUBLIC: (counts). The full log and screenshots
     # go into private.enc, encrypted with STATE_KEY. Never echo names, links or config here.
     runs-on: ${{ inputs.runner || vars.RUNNER || 'ubuntu-24.04' }}
-    timeout-minutes: 14
+    timeout-minutes: 40  # one FB DM took ~12 min through the phone relay on 18 Nov; runs send up to 3
     env:
       AIRTABLE_TOKEN: ${{ secrets.AIRTABLE_TOKEN }}
       RESEND_API_KEY: ${{ secrets.RESEND_API_KEY }}
