@@ -5,14 +5,14 @@
 //  2. a run still waiting for an ubuntu-slim machine after 4 minutes is cancelled and restarted on ubuntu-24.04
 //     (slim had no free machine on 17 Nov; standard minutes cost 4x, so slim stays the first choice).
 const SLOTS = ["13:04", "13:31", "13:57", "14:26", "14:49", "15:18", "15:44", "16:13", "16:37", "17:06", "17:33", "17:58", "18:27", "18:51", "19:19", "19:46", "20:12", "20:41", "21:07", "21:36"];
-// Repo comes from the Worker variable GH_REPO (owner/name), so the public code names no account.
+const REPO = 'Ayo-Billionaire/daily-runner'; // same name the repo URL shows
 const FALLBACK = 'ubuntu-24.04';
 // 17 Nov 2026 18:51 UTC: GitHub refused ubuntu-slim with "recent account payments have failed or your spending limit needs
 // to be increased"; ubuntu-24.04 runs fine. Start on 24.04 until the owner's billing page says slim is covered.
 const FIRST = 'ubuntu-24.04';
 
 function gh(env, path, init = {}) {
-  return fetch(`https://api.github.com/repos/${env.GH_REPO}${path}`, { ...init,
+  return fetch(`https://api.github.com/repos/${REPO}${path}`, { ...init,
     headers: { Authorization: 'Bearer ' + env.GH_DISPATCH_TOKEN, Accept: 'application/vnd.github+json',
                'User-Agent': 'runner-clock', 'X-GitHub-Api-Version': '2022-11-28', 'Content-Type': 'application/json' } });
 }
