@@ -26,6 +26,11 @@ FOLLOWUPS_PER_RUN = 20    # extra searches that look up a LinkedIn person's own 
 FIELDS_OK = {'Business', 'City', 'Website', 'Email', 'Instagram', 'Facebook', 'LinkedIn', 'Claude cross-check', 'Found on', 'Last posted'}
 EXA_CAP = 40              # Exa free plan = $10 a month, about 47 searches a day at $0.007
 FC_CAP = 60               # Firecrawl page reads per run (4,000 credits a month across the keys)
+# Directories only count when their pages show the coach's full details (website, email or socials). Tested 22 Nov 2026: Noomii, Bark,
+# Coach.me, Psychology Today, TherapyDen, BBB and the Chamber of Commerce show none of these, so none is used. Google Maps is the directory
+# that passes (website, phone, rating, reviews).
+DIRECTORY_SITES = ()
+SERP_CAP = 8               # SerpApi free plan = 250 searches a month; 8 a day stays inside it
 MAPS_PAIRS = 2             # city and coach type pairs searched on Google Maps each run
 MAPS_PER_SEARCH = 50       # places per Maps search; Apify free credit costs about $0.005 a place
 MAX_IDLE_DAYS = 90        # an Instagram page with no post for this long is treated as dead
@@ -436,6 +441,27 @@ def maps(kind, city, limit):
     return []
 
 
+_serp = {'n': 0}
+
+
+def serp(q, start):
+    """Real Google results pages 2 to 5 through SerpApi (free plan). The 'link' field is often a Google redirect, so the site comes from displayed_link."""
+    if _serp['n'] >= SERP_CAP or not secret('SERPAPI_API_KEY'):
+        return []
+    _serp['n'] += 1
+    try:
+        d = json.load(urllib.request.urlopen('https://serpapi.com/search.json?' + urllib.parse.urlencode(
+            {'engine': 'google', 'q': q, 'start': start, 'num': 10, 'api_key': secret('SERPAPI_API_KEY')}), timeout=60))
+    except Exception as e:
+        log('PUBLIC: serpapi error', type(e).__name__); return []
+    out = []
+    for r in d.get('organic_results', []):
+        shown = (r.get('displayed_link') or '').split(' \u203a ')[0].strip()
+        if re.match(r'^https?://[\w.-]+\.[a-z]{2,}', shown):
+            out.append({'url': shown, 'title': r.get('title') or '', 'snippet': r.get('snippet') or ''})
+    return out
+
+
 # ---------------- main ----------------
 def todays_pairs():
     n = dt.date.today().toordinal()
@@ -538,10 +564,27 @@ def main():
             c0['maps'] = {'phone': it.get('phone') or '', 'score': it.get('totalScore'), 'reviews': it.get('reviewsCount')}
     log('PUBLIC: maps places kept', nmaps)
 
+    # SerpApi: Google results pages 2 to 5, where small coaches with weak sites sit (Scouting Systems PDF, page 20).
+    nserp = 0
+    for kind, city in pairs[:2]:
+        q = f'"{kind}" "{city}" ("free discovery call" OR "book a call" OR "work with me") -site:linkedin.com -site:facebook.com -site:instagram.com -site:yelp.com'
+        for start in (10, 20, 30, 40):
+            for res in serp(q, start):
+                url, title, snip = res['url'], res['title'], res['snippet']
+                blob = (title + ' ' + snip).lower()
+                if 'coach' not in blob or NON_TARGET.search(blob) or BAD_REGION.search(blob):
+                    continue
+                host = root(dom(url))
+                if host in SKIP_DOMAINS or host.endswith(('.gov', '.edu')):
+                    continue
+                nserp += 1
+                cands.setdefault('w:' + (dom(url) if root(dom(url)) == dom(url) else host), {'type': 'web', 'host': dom(url), 'city': city, 'name': clean_title(title), 'q': 'serpapi'})
+    log('PUBLIC: serpapi results kept', nserp)
+
     # Directories: names of coaches listed on coaching directories; the follow-up search below finds their own website.
     for kind, city in pairs[:4]:
         short = city.rsplit(' ', 1)[0]
-        for dsite in ('noomii.com', 'bark.com', 'coach.me'):
+        for dsite in DIRECTORY_SITES:
             queries += 1
             for res in search(f'site:{dsite} {kind} {short}'):
                 title, snip = res.get('title', ''), res.get('snippet', '')
