@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
     inputs:
       runner: { description: 'machine label', default: '' }
-      job: { description: 'sync or summary', default: 'sync' }
+      job: { description: 'sync, summary or tick', default: 'sync' }
 permissions:
   contents: write
 concurrency:
@@ -21,6 +21,7 @@ jobs:
     env:
       AIRTABLE_TOKEN: ${{ secrets.AIRTABLE_TOKEN }}
       RESEND_API_KEY: ${{ secrets.RESEND_API_KEY }}
+      LUMINALEADS_API_KEY: ${{ secrets.LUMINALEADS_API_KEY }}
       STATE_KEY: ${{ secrets.STATE_KEY }}
       PRIVATE_CONFIG: ${{ secrets.PRIVATE_CONFIG }}
     steps:
@@ -33,9 +34,9 @@ jobs:
       - name: Run
         working-directory: dmsender
         run: |
-          case "${{ inputs.job }}" in sync|summary) ;; *) echo "bad job"; exit 1;; esac
+          case "${{ inputs.job }}" in sync|summary|tick) ;; *) echo "bad job"; exit 1;; esac
           set +e
-          python "${{ inputs.job }}.py" > ../run.log 2>&1
+          if [ "${{ inputs.job }}" = tick ]; then python tick.py --yes > ../run.log 2>&1; else python "${{ inputs.job }}.py" > ../run.log 2>&1; fi
           RC=$?
           set -e
           grep '^PUBLIC:' ../run.log || true
@@ -51,4 +52,4 @@ jobs:
         if: failure()
         working-directory: dmsender
         run: |
-          python3 -c "from common import email, run_link; email('DM sender ERROR: daily job failed', 'The daily sync or summary failed. Full log is in the encrypted artifact. Run: ' + run_link())" > /dev/null 2>&1
+          python3 -c "from common import email, run_link; email('DM sender ERROR: daily job failed', 'The daily sync, summary or approval tick failed. Full log is in the encrypted artifact. Run: ' + run_link())" > /dev/null 2>&1

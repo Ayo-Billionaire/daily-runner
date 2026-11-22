@@ -1,5 +1,5 @@
 // runner-clock (17 Nov 2026). GitHub never fired the dm-sender schedule on this repo, so this Worker is the clock.
-// Every minute, weekdays (UTC):
+// Every minute (UTC; the DM jobs weekdays only, finder and tick every day):
 //  1. starts the workflow due at this minute (12:35 sync, send slots from config.json slots_utc, 22:45 summary),
 //     but SKIPS a send slot while another send run is still running or waiting (two runs at once broke the state save);
 //  2. a run still waiting for an ubuntu-slim machine after 4 minutes is cancelled and restarted on ubuntu-24.04
@@ -53,11 +53,17 @@ async function rescueStuck(env, wf, inputs, now) {
 
 const SEND = { limit: '10', dry_run: 'false', force: 'false', only: '' };
 
+// 22 Nov 2026: GitHub's own schedule has never fired on this repo, so the lead finder and the approval tick start here too, every
+// day of the week. Tick slots (UTC): 11:30 lands before the 12:35 DM sync, 17:30 and 21:30 catch the rest of the day.
+const TICKS = ['11:30', '17:30', '21:30'];
+
 function due(d) {
   const day = d.getUTCDay();
-  if (day === 0 || day === 6) return [];
   const hm = d.toISOString().slice(11, 16);
   const out = [];
+  if (hm === '04:23') out.push(['leads.yml', null]);
+  if (TICKS.includes(hm)) out.push(['daily.yml', { job: 'tick' }]);
+  if (day === 0 || day === 6) return out;
   if (hm === '12:35') out.push(['daily.yml', { job: 'sync' }]);
   if (hm === '22:45') out.push(['daily.yml', { job: 'summary' }]);
   if (SLOTS.includes(hm)) out.push(['send.yml', SEND]);
@@ -70,7 +76,7 @@ async function tick(env, when) {
       const busy = await activeRuns(env, 'send.yml');
       if (busy.length) { await note(env, `skip send slot: run ${busy[0].id} still ${busy[0].status}`); continue; }
     }
-    await dispatch(env, wf, { ...inputs, runner: FIRST });
+    await dispatch(env, wf, inputs === null ? {} : { ...inputs, runner: FIRST });
   }
   await rescueStuck(env, 'send.yml', SEND, when);
   await rescueStuck(env, 'daily.yml', { job: 'sync' }, when);

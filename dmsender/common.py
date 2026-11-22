@@ -92,11 +92,16 @@ def _at(method, path, body=None, query=None):
 
 def airtable_rows(fields):
     a = CFG['airtable']
-    out, calls = [], 0
+    out, calls = [], 1
+    # 22 Nov: columns and a whole table were deleted by hand in Airtable. An unknown field name fails the read (HTTP 422),
+    # so read the live schema once, skip tables that are gone and ask only for columns that exist.
+    live = {t['id']: {x['name'] for x in t['fields']} for t in _at('GET', f"meta/bases/{a['base']}/tables")['tables']}
     for tname, tid in a['tables'].items():
+        if tid not in live:
+            continue
         offset, pos = None, 0
         while True:
-            q = {'pageSize': 100, 'view': a['view'], 'fields[]': fields}
+            q = {'pageSize': 100, 'view': a['view'], 'fields[]': [x for x in fields if x in live[tid]]}
             if offset:
                 q['offset'] = offset
             j = _at('GET', f"{a['base']}/{tid}", query=q)
