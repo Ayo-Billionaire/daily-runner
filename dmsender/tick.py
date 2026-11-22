@@ -104,7 +104,7 @@ def live_campaign_emails():
     return seen
 
 
-def main():
+def run_tick():
     if '--setup' in sys.argv:
         setup_columns()
         return
@@ -218,6 +218,13 @@ def main():
     log('rows marked scheduled:', done, '| failed', len(failed), '| left alone', len(plan) - done - len(failed))
     if failed:
         raise RuntimeError(f'{len(failed)} rows failed: ' + '; '.join(x[1] for x in failed[:5]))
+
+
+def main():
+    run_tick()
+    if YES and '--setup' not in sys.argv:
+        import sentmove   # after every tick: leads whose channels are all done move to the Sent table
+        sentmove.run()
 
 
 if __name__ == '__main__':

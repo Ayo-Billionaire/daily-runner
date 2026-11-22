@@ -484,7 +484,10 @@ def main():
     stale = (not st) or (dt.date.today() - dt.date.fromisoformat(st.get('refreshed', '2000-01-01'))).days >= 7
     have_em, have_dom, have_nm = (set(st['em']), set(st['dom']), set(st['nm'])) if st else (set(), set(), set())
     if stale:
-        tids = list(tables.values()) + ([cfg['replied_no']] if cfg.get('replied_no') else [])
+        # 22 Nov: tables can be deleted or added by hand (No Email or Socials went, Sent was added), so read the live list
+        # by name. Sent holds every lead already emailed or messaged, so the finder must still know them.
+        names = ('Email and Socials', 'Email Only', 'Socials Only (no email)', 'Replied No', 'Replied Yes', 'Sent')
+        tids = [t['id'] for t in at('GET', f'meta/bases/{base}/tables')['tables'] if t['name'] in names]
         for tid in tids:
             for r in read_table(base, tid):
                 f = r['fields']
