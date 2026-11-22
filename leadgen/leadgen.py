@@ -31,8 +31,10 @@ FC_CAP = 60               # Firecrawl page reads per run (4,000 credits a month 
 # that passes (website, phone, rating, reviews).
 DIRECTORY_SITES = ()
 SERP_CAP = 8               # SerpApi free plan = 250 searches a month; 8 a day stays inside it
-MAPS_PAIRS = 2             # city and coach type pairs searched on Google Maps each run
-MAPS_PER_SEARCH = 50       # places per Maps search; Apify free credit costs about $0.005 a place
+MAPS_SEARCHES = 5          # Google Maps searches per run
+MAPS_PER_SEARCH = 40       # places per Maps search; Apify free credit costs about $0.005 a place
+# Maps only has results for plain coach types in bigger cities ('executive coach' in Virginia Beach returned 3 places), so it gets its own list.
+MAPS_KINDS = ['life coach', 'business coach', 'career coach', 'health coach', 'wellness coach']
 MAX_IDLE_DAYS = 90        # an Instagram page with no post for this long is treated as dead
 
 KINDS = ['life coach', 'business coach', 'career coach', 'ADHD coach', 'health coach', 'executive coach',
@@ -548,7 +550,10 @@ def main():
                 cands.setdefault('li:' + prof.lower(), {'type': 'li', 'profile': prof, 'city': city, 'name': clean_title(title), 'q': 'exa'})
     # Google Maps (Apify): real local coach listings with website, phone, rating and reviews.
     nmaps = 0
-    for kind, city in pairs[-MAPS_PAIRS:]:
+    big = CITIES[:30]
+    n0 = dt.date.today().toordinal()
+    for i in range(MAPS_SEARCHES):
+        kind, city = MAPS_KINDS[(n0 + i) % len(MAPS_KINDS)], big[(n0 * MAPS_SEARCHES + i * 7) % len(big)]
         for it in maps(kind, city, MAPS_PER_SEARCH):
             title, cat = it.get('title') or '', it.get('categoryName') or ''
             blob = (title + ' ' + cat).lower()
