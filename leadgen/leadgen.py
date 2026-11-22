@@ -1,0 +1,594 @@
+#!/usr/bin/env python3
+"""Daily free coach lead finder (Ayo, 21 Nov 2026: "scrape leads free everyday on schedule and I can see them on Airtable").
+
+Engine: TinyFish Search (free, no card) running Google style dorks, plus a plain fetch of each coach's own site.
+Nothing here writes emails or DMs and nothing is sent. It only files NEW leads into the Cold Outreach tables.
+
+  python3 leadgen.py            find leads and write them to Airtable
+  python3 leadgen.py --dry      find leads, print a count, write nothing
+
+PUBLIC REPO: only 'PUBLIC:' lines are meant for the Actions log (counts only). Lead details stay in Airtable.
+Rules carried over from /coach-outreach: decision maker emails only (email_check), US first, dedupe on email, site and name
+across all four tables plus the Replied No table, never store a shared inbox.
+"""
+import json, os, re, sys, time, ssl, datetime as dt, urllib.request, urllib.parse, urllib.error
+import concurrent.futures as cf
+
+HERE = os.path.dirname(os.path.abspath(__file__)); sys.path.insert(0, HERE)
+import email_check
+sys.path.insert(0, os.path.join(os.path.dirname(HERE), 'dmsender'))
+import common   # encrypted state files committed back to the repo (same helper the DM sender uses)
+
+DRY = '--dry' in sys.argv
+DAILY_CAP = 150           # new leads written per run (Ayo 21 Nov: 100 to 150 a day)
+PAIRS_PER_RUN = 12        # (kind, city) pairs per run, each searched with 4 dorks + 2 platform footprints
+FOLLOWUPS_PER_RUN = 20    # extra searches that look up a LinkedIn person's own site
+FIELDS_OK = {'Business', 'City', 'Website', 'Email', 'Instagram', 'Facebook', 'LinkedIn', 'Claude cross-check', 'Found on', 'Last posted'}
+EXA_CAP = 40              # Exa free plan = $10 a month, about 47 searches a day at $0.007
+FC_CAP = 60               # Firecrawl page reads per run (4,000 credits a month across the keys)
+MAX_IDLE_DAYS = 90        # an Instagram page with no post for this long is treated as dead
+
+KINDS = ['life coach', 'business coach', 'career coach', 'ADHD coach', 'health coach', 'executive coach',
+         'mindset coach', 'wellness coach', 'relationship coach', 'leadership coach']
+CITIES = ['Austin TX', 'Denver CO', 'Atlanta GA', 'Phoenix AZ', 'Seattle WA', 'Portland OR', 'San Diego CA', 'Nashville TN',
+          'Charlotte NC', 'Raleigh NC', 'Tampa FL', 'Miami FL', 'Orlando FL', 'Dallas TX', 'Houston TX', 'Chicago IL',
+          'Minneapolis MN', 'Boston MA', 'Philadelphia PA', 'Pittsburgh PA', 'Columbus OH', 'Cleveland OH', 'Detroit MI',
+          'Salt Lake City UT', 'Las Vegas NV', 'Sacramento CA', 'San Francisco CA', 'Los Angeles CA', 'San Jose CA',
+          'Kansas City MO', 'St. Louis MO', 'Indianapolis IN', 'Milwaukee WI', 'Baltimore MD', 'Washington DC',
+          'Richmond VA', 'Virginia Beach VA', 'Louisville KY', 'Oklahoma City OK', 'San Antonio TX', 'Boise ID',
+          'Albuquerque NM', 'Tucson AZ', 'Honolulu HI', 'Omaha NE', 'Cincinnati OH', 'Jacksonville FL', 'New Orleans LA',
+          'Brooklyn NY', 'Scottsdale AZ']
+
+# Directories, social and big sites are never a coach's own website.
+SKIP_DOMAINS = {'linkedin.com', 'facebook.com', 'instagram.com', 'twitter.com', 'x.com', 'youtube.com', 'tiktok.com', 'pinterest.com',
+                'yelp.com', 'indeed.com', 'glassdoor.com', 'psychologytoday.com', 'thumbtack.com', 'bark.com', 'upwork.com',
+                'fiverr.com', 'eventbrite.com', 'meetup.com', 'groupon.com', 'wikipedia.org', 'reddit.com', 'quora.com',
+                'medium.com', 'forbes.com', 'inc.com', 'healthline.com', 'betterhelp.com', 'talkspace.com', 'coachfederation.org',
+                'coachingfederation.org', 'noomii.com', 'coach.me', 'ziprecruiter.com', 'linktr.ee', 'amazon.com', 'zocdoc.com',
+                'expertise.com', 'nextdoor.com', 'mapquest.com', 'bbb.org', 'chamberofcommerce.com', 'manta.com', 'alignable.com',
+                'deseret.com', 'goodtherapy.org', 'therapyden.com', 'teamwork.com', 'sba.gov', 'canva.com', 'substack.com', 'patch.com'}
+
+CTX = ssl.create_default_context(); CTX.check_hostname = False; CTX.verify_mode = ssl.CERT_NONE
+UA = 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120 Safari/537.36'
+NON_TARGET = re.compile(r'\b(gym|fitness|personal train|trainer|bodybuild|yoga|pilates|crossfit|ifbb|hypno|football|basketball|soccer|baseball|volleyball|softball|hockey|lacrosse|swim|sports?|athlet|mma|boxing|golf|tennis|dance|martial|barre|cycling|running|weight ?loss|keto|macros?|physique|muscle|bikini|powerlifting|strength|credit score|credit repair|doula|mortgage|insurance|loan officer|realtor|real estate|dentist|chiropract|massage|tax prep|bookkeep)\b', re.I)
+BAD_TITLE = re.compile(r'(\btop \d*|\bbest \d*|\d+ (best|top)|compared|browse|directory|near me|reviews?\b|how to|find a |list of|\bpost\b|photos and videos|instagram|facebook|\.\.\.|\bwelcome\b|just got|excited|foundation|^about\b|^home\b|\bjobs?\b|hiring|certified coaches)', re.I)
+FREE_MAIL = ('gmail.com', 'yahoo.com', 'outlook.com', 'icloud.com', 'hotmail.com', 'proton.me', 'protonmail.com', 'aol.com', 'live.com', 'me.com')
+ROLE_EXTRA = ('assist', 'assistant', 'coaches', 'coachinfo', 'inquire', 'enquire', 'connect', 'reach', 'talk', 'ask', 'bookme', 'booknow', 'client', 'admin', 'manager', 'support', 'office', 'mail', 'email', 'hello', 'hi', 'info', 'contact', 'team')
+BAD_REGION = re.compile(r'\b(india|pakistan|bangladesh|nigeria|lagos|karachi|mumbai|delhi|dhaka)\b', re.I)
+EMRE = re.compile(r'[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}')
+BADEM = ('example', 'sentry', 'wixpress', 'domain.com', 'email.com', 'yourname', '.png', '.jpg', '.webp', '.gif', '.svg', 'godaddy',
+         'squarespace', '@2x', 'name@', 'test@', 'user@', 'you@', 'your@', 'johndoe', 'janedoe', 'sample@')
+
+
+def log(*a):
+    print(*a, flush=True)
+
+
+def secret(name):
+    v = os.environ.get(name, '').strip()
+    if v:
+        return v
+    f = os.path.expanduser('~/.secrets/api-keys.env')
+    if os.path.exists(f):
+        for line in open(f):
+            m = re.match(r'\s*(?:export\s+)?' + name + r'=(.+)', line)
+            if m:
+                return m.group(1).strip().strip('"\'')
+    return ''
+
+
+def config():
+    raw = os.environ.get('PRIVATE_CONFIG', '').strip()
+    if not raw:
+        p = os.path.join(os.path.dirname(HERE), 'private_config.json')
+        raw = open(p).read() if os.path.exists(p) else '{}'
+    return json.loads(raw)
+
+
+# ---------------- search ----------------
+_last = [0.0]
+
+
+def search(q):
+    """TinyFish Search (free, 30 a minute). Returns [{title, url, snippet}]."""
+    wait = 2.4 - (time.time() - _last[0])
+    if wait > 0:
+        time.sleep(wait)
+    _last[0] = time.time()
+    u = 'https://api.search.tinyfish.ai?' + urllib.parse.urlencode({'query': q})
+    for i in range(3):
+        try:
+            r = urllib.request.urlopen(urllib.request.Request(u, headers={'X-API-Key': secret('TINYFISH_API_KEY'), 'User-Agent': 'leadgen'}), timeout=40)
+            return json.load(r).get('results', [])
+        except urllib.error.HTTPError as e:
+            if e.code == 429 and i < 2:
+                time.sleep(20)
+                continue
+            log('PUBLIC: search http', e.code)
+            return []
+        except Exception as e:
+            if i < 2:
+                time.sleep(4)
+                continue
+            log('PUBLIC: search error', type(e).__name__)
+            return []
+    return []
+
+
+def dom(u):
+    m = re.search(r'(?:https?://)?(?:www\.)?([^/\s?#]+)', u or '')
+    return m.group(1).lower() if m else ''
+
+
+FREE_PLATFORMS = ('wixsite.com', 'squarespace.com', 'webflow.io', 'framer.website', 'carrd.co', 'godaddysites.com', 'wordpress.com', 'myshopify.com', 'weebly.com', 'site123.me', 'business.site')
+
+
+def root(d):
+    if any(d == f or d.endswith('.' + f) for f in FREE_PLATFORMS):
+        return d          # a free-platform site is its own business, never collapse to wixsite.com
+    p = d.split('.')
+    return '.'.join(p[-2:]) if len(p) >= 2 else d
+
+
+def norm(n):
+    return re.sub(r'[^a-z0-9]', '', (n or '').lower())
+
+
+def clean_title(t):
+    t = re.sub(r'\s+', ' ', t or '').strip()
+    t = re.split(r'\s\(@', t)[0]
+    t = re.split(r'\s[-|–—·]\s|,\s', t)[0]
+    return t.strip(' -|')[:80]
+
+
+def social_base(u, host):
+    """Profile root only (no post, reel or photo links)."""
+    p = urllib.parse.urlparse(u)
+    parts = [x for x in p.path.split('/') if x]
+    if not parts:
+        return ''
+    bad = ('p', 'reel', 'reels', 'explore', 'stories', 'posts', 'photo', 'photos', 'groups', 'events', 'watch', 'share', 'sharer', 'tr', 'plugins', 'dialog', 'hashtag', 'public', 'pages', 'directory', 'pulse', 'jobs', 'feed', 'company')
+    if parts[0].lower() in bad:
+        if host == 'facebook.com' and parts[0] == 'pages' and len(parts) > 2:
+            return f'https://www.facebook.com/{parts[1]}/{parts[2]}'
+        return ''
+    h0 = parts[0].lower()
+    if h0 in ('profile.php', '2008', 'tr', 'login', 'home.php') or (host == 'facebook.com' and h0.isdigit() and len(h0) < 10):
+        return ''
+    if host == 'linkedin.com':
+        return f'https://www.linkedin.com/{parts[0]}/{parts[1]}' if parts[0] == 'in' and len(parts) > 1 else ''
+    return f'https://www.{host}/{parts[0]}'
+
+
+# ---------------- site check ----------------
+def get(u):
+    try:
+        r = urllib.request.urlopen(urllib.request.Request(u, headers={'User-Agent': UA}), timeout=6, context=CTX)
+        return r.read(700000).decode('utf-8', 'ignore')
+    except Exception:
+        return ''
+
+
+def soc(html, pat, host):
+    for m in re.findall(r'https?://(?:www\.)?' + pat + r'[^"\'\s<>)\\]+', html):
+        b = social_base(m.split('?')[0], host)
+        if b:
+            return b
+    return ''
+
+
+def check_site(host):
+    try:
+        return _check_site(host)
+    except Exception:
+        return None   # one broken page must never stop the daily run
+
+
+def _check_site(host):
+    base = 'https://' + host
+    html = get(base) or get('http://' + host)
+    if not html:
+        return None
+    pages = html
+    for p in ('/contact',):
+        pages += get(base + p)
+    text = re.sub(r'<[^>]+>', ' ', html).lower()
+    coach, therapy = text.count('coach'), text.count('therap') + text.count('counsel')
+    ems = []
+    for e in EMRE.findall(pages) + re.findall(r'mailto:([^"\'?<>\s]+)', pages):
+        e = e.lower().strip('.')
+        if not re.fullmatch(EMRE.pattern, e) or any(b in e for b in BADEM) or e in ems:
+            continue
+        ems.append(e)
+    def ok_email(e):
+        if not email_check.check(e)[0]:
+            return False
+        local, ed = e.split('@')
+        if re.sub(r'[._\-+0-9]+', '', local) in ROLE_EXTRA or any(local.startswith(r) and len(local) <= len(r) + 3 for r in ('assist', 'coach')):
+            return False
+        return ed in FREE_MAIL or root(ed) == root(host)   # an address on someone else's domain is not theirs
+    personal = [e for e in ems if ok_email(e)]
+    shared = [e for e in ems if not ok_email(e) and root(e.split('@')[1]) == root(host)]
+    problems = []
+    if any(host == f or host.endswith('.' + f) for f in FREE_PLATFORMS):
+        problems.append('free platform address, no custom domain')
+    if 'name="viewport"' not in html.lower() and "name='viewport'" not in html.lower():
+        problems.append('no mobile layout tag')
+    low = pages.lower()
+    if '<form' not in low and 'calendly' not in low and 'acuity' not in low and 'book' not in text:
+        problems.append('no contact form or booking link found')
+    yrs = [int(y) for y in re.findall(r'(?:\u00a9|&copy;|copyright)[^0-9]{0,30}(20[0-3][0-9])', html, re.I)]
+    if yrs and max(yrs) < dt.date.today().year - 1:
+        problems.append(f'footer says {max(yrs)}, site looks not updated')
+    t = re.search(r'<title[^>]*>(.*?)</title>', html, re.S | re.I)
+    return {'host': host, 'problems': problems, 'coach': coach, 'therapy': therapy, 'email': personal[0] if personal else '', 'shared': shared[0] if shared else '',
+            'ig': soc(pages, r'instagram\.com/', 'instagram.com'), 'fb': soc(pages, r'facebook\.com/', 'facebook.com'),
+            'li': soc(pages, r'linkedin\.com/in/', 'linkedin.com'), 'title': clean_title(re.sub(r'<[^>]+>', '', t.group(1))) if t else ''}
+
+
+# ---------------- airtable ----------------
+def at(method, path, body=None, query=None):
+    url = 'https://api.airtable.com/v0/' + path + ('?' + urllib.parse.urlencode(query, doseq=True) if query else '')
+    for i in range(3):
+        try:
+            req = urllib.request.Request(url, method=method, data=json.dumps(body).encode() if body else None,
+                                         headers={'Authorization': 'Bearer ' + secret('AIRTABLE_TOKEN'), 'Content-Type': 'application/json'})
+            with urllib.request.urlopen(req, timeout=40) as r:
+                return json.load(r)
+        except urllib.error.HTTPError as e:
+            if e.code in (429, 500, 502, 503) and i < 2:
+                time.sleep(31 if e.code == 429 else 5)
+                continue
+            raise RuntimeError(f'Airtable {method} HTTP {e.code}: {e.read().decode()[:200]}')
+        except (urllib.error.URLError, OSError, ValueError) as e:   # dropped connection, timeout, truncated body
+            if i < 2:
+                time.sleep(4 + i * 4)
+                continue
+            raise RuntimeError(f'Airtable {method} network error: {type(e).__name__}')
+
+
+def read_table(base, tid):
+    out, off = [], None
+    while True:
+        q = {'pageSize': 100, 'fields[]': ['Business', 'Website', 'Email']}
+        if off:
+            q['offset'] = off
+        d = at('GET', f'{base}/{tid}', query=q)
+        out += d['records']
+        off = d.get('offset')
+        if not off:
+            return out
+
+
+def ensure_found_on(base, tables):
+    """Adds a 'Found on' date column once, so Ayo can sort or filter the new leads. Needs schema scope; silently skipped without it."""
+    try:
+        meta = at('GET', f'meta/bases/{base}/tables')
+        for t in meta['tables']:
+            if t['id'] in tables.values() and 'Found on' not in [f['name'] for f in t['fields']]:
+                at('POST', f"meta/bases/{base}/tables/{t['id']}/fields", {'name': 'Found on', 'type': 'singleLineText'})
+                log('PUBLIC: added Found on column')
+        return True
+    except Exception as e:
+        log('PUBLIC: Found on column not available (' + str(e)[:60] + ')')
+        return False
+
+
+
+# ---------------- Exa (free plan) and Firecrawl ----------------
+_exa = {'n': 0, 'dead': False}
+
+
+def exa(q, category=None, n=10):
+    if _exa['dead'] or _exa['n'] >= EXA_CAP or not secret('EXA_API_KEY'):
+        return []
+    _exa['n'] += 1
+    body = {'query': q, 'numResults': n, 'type': 'auto'}
+    if category:
+        body['category'] = category
+    for i in range(3):
+        try:
+            r = urllib.request.urlopen(urllib.request.Request('https://api.exa.ai/search', data=json.dumps(body).encode(),
+                                       headers={'x-api-key': secret('EXA_API_KEY'), 'Content-Type': 'application/json'}), timeout=60)
+            return json.load(r).get('results', [])
+        except urllib.error.HTTPError as e:
+            if e.code in (402, 403):
+                _exa['dead'] = True      # out of free credit: skip Exa for the rest of the run
+                log('PUBLIC: Exa out of credit, skipped')
+                return []
+            if e.code == 429 and i < 2:
+                time.sleep(5); continue
+            return []
+        except Exception:
+            if i < 2:
+                time.sleep(3); continue
+            return []
+    return []
+
+
+_fc = {'n': 0}
+
+
+def firecrawl(url):
+    """One page as markdown (Instagram profile with recent posts, LinkedIn profile). Facebook is not supported by Firecrawl."""
+    if _fc['n'] >= FC_CAP:
+        return ''
+    keys = [secret(k) for k in ('FIRECRAWL_API_KEY', 'FIRECRAWL_API_KEY_2', 'FIRECRAWL_API_KEY_3', 'FIRECRAWL_API_KEY_4')]
+    for k in [k for k in keys if k]:
+        _fc['n'] += 1
+        try:
+            r = urllib.request.urlopen(urllib.request.Request('https://api.firecrawl.dev/v1/scrape', data=json.dumps({'url': url, 'formats': ['markdown']}).encode(),
+                                       headers={'Authorization': 'Bearer ' + k, 'Content-Type': 'application/json'}), timeout=90)
+            return (json.load(r).get('data') or {}).get('markdown', '') or ''
+        except urllib.error.HTTPError as e:
+            if e.code == 402:
+                continue            # this key is out of credit, try the next
+            return ''
+        except Exception:
+            return ''
+    return ''
+
+
+def real_links(md):
+    out = []
+    for u in re.findall(r'https?://[^\s)\]>"\']+', md):
+        h = root(dom(u))
+        if h in SKIP_DOMAINS or h in ('linktr.ee', 'beacons.ai', 'bio.site', 'lnk.bio', 'campsite.bio') or h.endswith(('.gov', '.edu')):
+            continue
+        if any(x in h for x in ('instagram', 'facebook', 'linkedin', 'google', 'youtube', 'apple.com', 'spotify', 'calendly', 'tiktok', 'cdninstagram', 'fbcdn')):
+            continue
+        out.append(dom(u))
+    return out
+
+
+def enrich_ig(c):
+    """Instagram profile via Firecrawl: bio link (own website), email in bio, followers, date of the newest post."""
+    md = firecrawl(c['profile'])
+    if not md:
+        return
+    posts = re.findall(r'(20\d\d-\d\d-\d\d)', md)
+    if posts:
+        c['last_post'] = max(posts)
+    bio = md.split('## Recent posts')[0]
+    c['bio'] = re.sub(r'\s+', ' ', bio)[:300]
+    for e in EMRE.findall(bio):
+        e = e.lower().strip('.')
+        if not any(b in e for b in BADEM) and email_check.check(e)[0]:
+            c['bio_email'] = e; break
+    if not c.get('host'):
+        links = real_links(bio)
+        if links:
+            c['host'] = links[0]
+    if BAD_REGION.search(bio):
+        c['skip'] = 'bio location'
+
+
+def enrich_li(c):
+    md = firecrawl(c['profile'])
+    if not md:
+        return
+    head = md[:1500]
+    if BAD_REGION.search(head):
+        c['skip'] = 'linkedin location'; return
+    if not c.get('host'):
+        links = real_links(md[:6000])
+        if links:
+            c['host'] = links[0]
+    for e in EMRE.findall(md[:6000]):
+        e = e.lower().strip('.')
+        if not any(b in e for b in BADEM) and email_check.check(e)[0]:
+            c['bio_email'] = e; break
+
+
+GENERIC_NAME = re.compile(r'^(contact( us)?|testimonials?|home|about( me| us)?|services?|welcome|coaching|life coach(ing)?|business coach(ing)?|career coach(ing)?|health coach(ing)?|executive coach(ing)?|wellness coach(ing)?|mindset coach(ing)?|relationship coach(ing)?|leadership coach(ing)?|1-?on-?1 coaching|coach|my story|blog|book( now| a call)?|work with me|programs?)$', re.I)
+
+
+def tidy_name(name, host, kind):
+    """Search titles often come back as page names ('Testimonials', 'Contact Amber Farooqui'). Strip the filler,
+    and fall back to the website name when nothing real is left."""
+    n = re.sub(r'^(contact|meet|about|hire|work with|welcome to)\s+', '', name or '', flags=re.I).strip(' :-|')
+    if GENERIC_NAME.match(n) or len(n) < 3:
+        if kind == 'web' and host:
+            label = root(host).split('.')[0] if root(host) == host else host.split('.')[0]
+            n = re.sub(r'[-_]+', ' ', label).strip().title()
+            return n if len(n) >= 4 else ''
+        return ''
+    return n
+
+
+# ---------------- main ----------------
+def todays_pairs():
+    n = dt.date.today().toordinal()
+    out = []
+    for i in range(PAIRS_PER_RUN):
+        k = n * PAIRS_PER_RUN + i
+        out.append((KINDS[k % len(KINDS)], CITIES[(k // len(KINDS) + k * 7) % len(CITIES)]))
+    return out
+
+
+def main():
+    cfg = config(); A = cfg['airtable']; base = A['base']; tables = A['tables']
+    if not secret('TINYFISH_API_KEY') or not secret('AIRTABLE_TOKEN'):
+        log('PUBLIC: missing TINYFISH_API_KEY or AIRTABLE_TOKEN'); sys.exit(1)
+    # Known leads live in an encrypted state file, so a daily run costs Airtable only the write calls.
+    # Full re-read of Airtable at most once a week (picks up rows Ayo added, moved or deleted by hand).
+    st = common.load('leads_seen', None)
+    stale = (not st) or (dt.date.today() - dt.date.fromisoformat(st.get('refreshed', '2000-01-01'))).days >= 7
+    have_em, have_dom, have_nm = (set(st['em']), set(st['dom']), set(st['nm'])) if st else (set(), set(), set())
+    if stale:
+        tids = list(tables.values()) + ([cfg['replied_no']] if cfg.get('replied_no') else [])
+        for tid in tids:
+            for r in read_table(base, tid):
+                f = r['fields']
+                if f.get('Email'): have_em.add(f['Email'].lower())
+                if f.get('Website'): have_dom.add(root(dom(f['Website'])))
+                if f.get('Business'): have_nm.add(norm(f['Business']))
+        log('PUBLIC: refreshed known leads from Airtable')
+    log('PUBLIC: known leads', len(have_nm))
+
+    cands, queries = {}, 0   # key -> lead dict
+    pairs = todays_pairs()
+    for kind, city in pairs:
+        short = city.rsplit(' ', 1)[0]
+        dorks = [
+            ('web', f'"{kind}" "{city}" ("free discovery call" OR "book a call" OR "work with me") -site:linkedin.com -site:facebook.com -site:instagram.com -site:yelp.com'),
+            ('li', f'site:linkedin.com/in "{kind}" (founder OR owner OR "CEO") "{short}"'),
+            ('ig', f'site:instagram.com "{kind}" "{short}" "link in bio" OR "DM me" OR "book"'),
+            ('fb', f'site:facebook.com "{kind}" "{short}" coaching page -groups -events'),
+        ]
+        k0 = dt.date.today().toordinal() + len(dorks) * len(pairs)
+        for j in range(2):
+            plat = FREE_PLATFORMS[(k0 + j + len(short)) % len(FREE_PLATFORMS)]
+            dorks.append(('fp', f'site:{plat} "{kind}" "{short}"'))
+        for kindtag, q in dorks:
+            queries += 1
+            for res in search(q):
+                url, title, snip = res.get('url', ''), res.get('title', ''), res.get('snippet', '')
+                blob = (title + ' ' + snip).lower()
+                if 'coach' not in blob or NON_TARGET.search(blob) or BAD_REGION.search(blob):
+                    continue
+                host = root(dom(url))
+                if kindtag == 'fp':
+                    full = dom(url)
+                    if root(full) != full or not any(full.endswith('.' + f) for f in FREE_PLATFORMS):
+                        continue
+                    cands.setdefault('w:' + full, {'type': 'web', 'host': full, 'city': city, 'name': clean_title(title), 'q': 'footprint'})
+                elif kindtag == 'web':
+                    if host in SKIP_DOMAINS or any(host.endswith('.' + s) for s in SKIP_DOMAINS) or host.endswith(('.gov', '.edu')):
+                        continue
+                    cands.setdefault('w:' + host, {'type': 'web', 'host': dom(url), 'city': city, 'name': clean_title(title), 'q': kindtag})
+                else:
+                    site = {'li': 'linkedin.com', 'ig': 'instagram.com', 'fb': 'facebook.com'}[kindtag]
+                    if host != site:
+                        continue
+                    prof = social_base(url.split('?')[0], site)
+                    if not prof:
+                        continue
+                    key = kindtag + ':' + prof.lower()
+                    cands.setdefault(key, {'type': kindtag, 'profile': prof, 'city': city, 'name': clean_title(title), 'q': kindtag})
+    # Exa (free plan): coaches' own sites and LinkedIn profiles, cleaner than dorks.
+    for kind, city in pairs:
+        short = city.rsplit(' ', 1)[0]
+        for res in exa(f'independent {kind} in {short} personal coaching website book a free discovery call'):
+            url, title = res.get('url', ''), res.get('title') or ''
+            host = root(dom(url))
+            if host in SKIP_DOMAINS or host.endswith(('.gov', '.edu')) or NON_TARGET.search(title) or BAD_REGION.search(title):
+                continue
+            cands.setdefault('w:' + (dom(url) if root(dom(url)) == dom(url) else host), {'type': 'web', 'host': dom(url), 'city': city, 'name': clean_title(title), 'q': 'exa'})
+        for res in exa(f'{kind} founder {short}', category='linkedin profile'):
+            url, title = res.get('url', ''), res.get('title') or ''
+            prof = social_base(url.split('?')[0], 'linkedin.com') if root(dom(url)) == 'linkedin.com' else ''
+            if prof and 'coach' in title.lower() and not NON_TARGET.search(title) and not BAD_REGION.search(title):
+                cands.setdefault('li:' + prof.lower(), {'type': 'li', 'profile': prof, 'city': city, 'name': clean_title(title), 'q': 'exa'})
+    log('PUBLIC: searches', queries, 'exa', _exa['n'], 'candidates', len(cands))
+
+    # LinkedIn people: one more search to find their own site / Instagram.
+    fu = 0
+    for key, c in list(cands.items()):
+        if c['type'] not in ('li', 'ig', 'fb') or c.get('host') or fu >= FOLLOWUPS_PER_RUN or not c['name'] or norm(c['name']) in have_nm:
+            continue
+        fu += 1
+        for res in search(f'"{c["name"]}" coach {c["city"].rsplit(" ", 1)[0]} website OR instagram'):
+            host = root(dom(res.get('url', '')))
+            if host == 'instagram.com' and not c.get('ig') and 'coach' in (res.get('title', '') + res.get('snippet', '')).lower():
+                c['ig'] = social_base(res['url'].split('?')[0], 'instagram.com')
+            elif host not in SKIP_DOMAINS and not c.get('host') and 'coach' in (res.get('title', '') + res.get('snippet', '')).lower() and not NON_TARGET.search(res.get('title', '') + res.get('snippet', '')):
+                c['host'] = dom(res['url'])
+        queries += 1
+
+    # Firecrawl: Instagram bio link, email and newest post date; LinkedIn location and links. Thin leads first.
+    todo = [c for c in cands.values() if c['type'] in ('ig', 'li') and norm(c['name']) not in have_nm]
+    todo.sort(key=lambda c: (bool(c.get('host')), c['type'] != 'ig'))
+    todo = todo[:FC_CAP]
+    with cf.ThreadPoolExecutor(6) as ex:
+        list(ex.map(lambda c: enrich_ig(c) if c['type'] == 'ig' else enrich_li(c), todo))
+    log('PUBLIC: firecrawl reads', _fc['n'])
+
+    # Check each coach's own site for links and a personal email.
+    hosts = {c['host'] for c in cands.values() if c.get('host') and root(c['host']) not in have_dom}
+    with cf.ThreadPoolExecutor(32) as ex:
+        sites = dict(zip(hosts, ex.map(check_site, hosts)))
+
+    leads, seen_nm = [], set()
+    for key, c in cands.items():
+        s = sites.get(c.get('host')) if c.get('host') else None
+        if c['type'] == 'web' and not s:
+            continue
+        if c.get('skip'):
+            continue
+        if c.get('last_post') and (dt.date.today() - dt.date.fromisoformat(c['last_post'])).days > MAX_IDLE_DAYS:
+            continue   # Instagram page has gone quiet
+        if s and (s['coach'] < 3 or s['therapy'] > s['coach']):
+            if c['type'] == 'web':
+                continue   # not a coach site (directory, clinic, school)
+            s = None; c = dict(c, host='')   # a social lead keeps going without the wrong website
+        name = c['name']
+        if BAD_TITLE.search(name or '') and s and s['title'] and not BAD_TITLE.search(s['title']):
+            name = s['title']
+        if not name or len(name) < 3 or len(name.split()) > 8 or BAD_TITLE.search(name) or NON_TARGET.search(name):
+            continue
+        if s and NON_TARGET.search(s['title']):
+            continue
+        name = tidy_name(name, c.get('host') or (s['host'] if s else ''), c['type'])
+        if not name:
+            continue
+        L = {'Business': name, 'City': c['city'], 'Found on': dt.date.today().isoformat()}
+        if c.get('host'): L['Website'] = 'https://' + c['host']
+        ig = c.get('ig') or (c['profile'] if c['type'] == 'ig' else '') or (s['ig'] if s else '')
+        fb = (c['profile'] if c['type'] == 'fb' else '') or (s['fb'] if s else '')
+        li = (c['profile'] if c['type'] == 'li' else '') or (s['li'] if s else '')
+        if ig: L['Instagram'] = ig
+        if fb: L['Facebook'] = fb
+        if li: L['LinkedIn'] = li
+        note = f"AUTO {dt.date.today().isoformat()} | found by {c['q']} dork in {c['city']}"
+        if s and s['problems']: note += ' | Problem seen: ' + '; '.join(s['problems'])
+        if c.get('last_post'): L['Last posted'] = c['last_post']
+        if s and s['email']: L['Email'] = s['email']
+        elif c.get('bio_email'): L['Email'] = c['bio_email']
+        elif s and s['shared']: note += f" | Shared inbox {s['shared']} NOT stored (decision maker only). Needs owner email."
+        L['Claude cross-check'] = note
+        em = L.get('Email', '').lower()
+        d = root(dom(L.get('Website', ''))) if L.get('Website') else ''
+        if (em and em in have_em) or (d and d in have_dom) or norm(name) in have_nm or norm(name) in seen_nm:
+            continue
+        seen_nm.add(norm(name)); have_nm.add(norm(name))
+        if d: have_dom.add(d)
+        if em: have_em.add(em)
+        leads.append(L)
+    def score(L):
+        return (5 if L.get('Email') else 0) + (2 if L.get('Website') else 0) + (2 if L.get('Instagram') else 0) + (1 if L.get('Facebook') else 0) \
+            + (1 if L.get('LinkedIn') else 0) + (1 if L.get('Last posted') else 0) + (1 if 'exa dork' in L['Claude cross-check'] or 'found by exa' in L['Claude cross-check'] else 0)
+    leads = [L for L in leads if L.get('Email') or L.get('Website') or L.get('Instagram') or L.get('Facebook') or L.get('LinkedIn')]
+    leads.sort(key=score, reverse=True)     # best leads first, so the daily cap never cuts the richest rows
+    leads = leads[:DAILY_CAP]
+
+    def table_for(L):
+        so = bool(L.get('Instagram') or L.get('Facebook'))
+        em = bool(L.get('Email'))
+        return 'Email and Socials' if em and so else 'Email Only' if em else 'Socials Only (no email)' if so else 'No Email or Socials'
+
+    by = {}
+    for L in leads:
+        by.setdefault(table_for(L), []).append(L)
+    counts = {k: len(v) for k, v in by.items()}
+    if DRY:
+        log('PUBLIC: DRY RUN new leads', len(leads), counts)
+        if '--show' in sys.argv:
+            for L in leads: print(json.dumps(L))
+        return
+    has_found = (st or {}).get('found_on', False)
+    if leads and not has_found:
+        has_found = ensure_found_on(base, tables)
+    for t, rows in by.items():
+        for i in range(0, len(rows), 10):
+            batch = [{'fields': {k: v for k, v in L.items() if k in FIELDS_OK and (k != 'Found on' or has_found)}} for L in rows[i:i + 10]]
+            at('POST', f'{base}/{tables[t]}', {'records': batch, 'typecast': True})
+    # Save state only after Airtable accepted the rows, so a failed run is retried next time.
+    common.save('leads_seen', {'em': sorted(have_em), 'dom': sorted(have_dom), 'nm': sorted(have_nm),
+                               'refreshed': dt.date.today().isoformat() if stale else st['refreshed'], 'found_on': has_found})
+    common.commit('lead finder state')
+    log('PUBLIC: NEW LEADS ADDED', len(leads), counts)
+
+
+if __name__ == '__main__':
+    main()

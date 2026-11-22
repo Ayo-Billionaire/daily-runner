@@ -1,0 +1,46 @@
+name: leads
+on:
+  schedule:
+    - cron: '23 4 * * *'   # every day 04:23 UTC = 05:23 Lagos
+  workflow_dispatch:
+permissions:
+  contents: write
+concurrency:
+  group: leads
+  cancel-in-progress: false
+defaults:
+  run:
+    shell: bash
+jobs:
+  find:
+    # PUBLIC REPO: only PUBLIC: count lines reach the log. Lead details go to Airtable only.
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    env:
+      AIRTABLE_TOKEN: ${{ secrets.AIRTABLE_TOKEN }}
+      TINYFISH_API_KEY: ${{ secrets.TINYFISH_API_KEY }}
+      EXA_API_KEY: ${{ secrets.EXA_API_KEY }}
+      FIRECRAWL_API_KEY: ${{ secrets.FIRECRAWL_API_KEY }}
+      STATE_KEY: ${{ secrets.STATE_KEY }}
+      RESEND_API_KEY: ${{ secrets.RESEND_API_KEY }}
+      PRIVATE_CONFIG: ${{ secrets.PRIVATE_CONFIG }}
+    steps:
+      - uses: actions/checkout@v4
+        with: { ref: main }
+      - uses: actions/setup-python@v5
+        with: { python-version: '3.12' }
+      - run: git config user.name "runner" && git config user.email "runner@users.noreply.github.com"
+      - run: pip install -q cryptography==43.0.3 > /dev/null 2>&1
+      - name: Find new coach leads
+        working-directory: leadgen
+        run: |
+          set +e
+          python leadgen.py > ../leads.log 2>&1
+          RC=$?
+          grep '^PUBLIC:' ../leads.log || true
+          exit $RC
+      - name: Email on failure
+        if: failure()
+        working-directory: dmsender
+        run: |
+          python3 -c "from common import email, run_link; email('LEAD FINDER ERROR: daily job failed', 'The daily coach lead finder failed. Run: ' + run_link())" > /dev/null 2>&1
