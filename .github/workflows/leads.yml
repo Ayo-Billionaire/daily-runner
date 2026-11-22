@@ -21,6 +21,7 @@ jobs:
       TINYFISH_API_KEY: ${{ secrets.TINYFISH_API_KEY }}
       EXA_API_KEY: ${{ secrets.EXA_API_KEY }}
       FIRECRAWL_API_KEY: ${{ secrets.FIRECRAWL_API_KEY }}
+      APIFY_TOKENS: ${{ secrets.APIFY_TOKENS }}
       STATE_KEY: ${{ secrets.STATE_KEY }}
       RESEND_API_KEY: ${{ secrets.RESEND_API_KEY }}
       PRIVATE_CONFIG: ${{ secrets.PRIVATE_CONFIG }}

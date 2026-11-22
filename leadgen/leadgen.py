@@ -26,6 +26,8 @@ FOLLOWUPS_PER_RUN = 20    # extra searches that look up a LinkedIn person's own 
 FIELDS_OK = {'Business', 'City', 'Website', 'Email', 'Instagram', 'Facebook', 'LinkedIn', 'Claude cross-check', 'Found on', 'Last posted'}
 EXA_CAP = 40              # Exa free plan = $10 a month, about 47 searches a day at $0.007
 FC_CAP = 60               # Firecrawl page reads per run (4,000 credits a month across the keys)
+MAPS_PAIRS = 2             # city and coach type pairs searched on Google Maps each run
+MAPS_PER_SEARCH = 50       # places per Maps search; Apify free credit costs about $0.005 a place
 MAX_IDLE_DAYS = 90        # an Instagram page with no post for this long is treated as dead
 
 KINDS = ['life coach', 'business coach', 'career coach', 'ADHD coach', 'health coach', 'executive coach',
@@ -396,6 +398,44 @@ def tidy_name(name, host, kind):
     return n
 
 
+_ap = {'i': 0, 'dead': set()}
+
+
+def apify_tokens():
+    raw = os.environ.get('APIFY_TOKENS', '').strip()
+    if raw:
+        return [t.strip() for t in raw.split(',') if t.strip()]
+    f = os.path.expanduser('~/.secrets/api-keys.env')
+    out = []
+    if os.path.exists(f):
+        for line in open(f):
+            m = re.match(r'\s*(?:export\s+)?APIFY_TOKEN_(\d+)=(.+)', line)
+            if m and int(m.group(1)) >= 5:        # tokens 1 to 4 are dead accounts
+                out.append(m.group(2).strip().strip('"\''))
+    return out
+
+
+def maps(kind, city, limit):
+    """Google Maps through Apify (free monthly credit per account). Rotates to the next token when one is out of credit."""
+    toks = [t for t in apify_tokens() if t not in _ap['dead']]
+    body = {'searchStringsArray': [kind], 'locationQuery': city + ', USA', 'maxCrawledPlacesPerSearch': limit,
+            'language': 'en', 'scrapeContacts': False, 'skipClosedPlaces': True}
+    for t in toks[_ap['i'] % max(len(toks), 1):] + toks[:_ap['i'] % max(len(toks), 1)]:
+        try:
+            r = urllib.request.urlopen(urllib.request.Request(
+                'https://api.apify.com/v2/acts/compass~crawler-google-places/run-sync-get-dataset-items?token=' + t + '&timeout=170',
+                data=json.dumps(body).encode(), headers={'Content-Type': 'application/json'}), timeout=190)
+            return json.load(r)
+        except urllib.error.HTTPError as e:
+            if e.code in (402, 403, 429):
+                _ap['dead'].add(t); continue    # out of credit on this token, try the next
+            log('PUBLIC: maps http', e.code); return []
+        except Exception as e:
+            log('PUBLIC: maps error', type(e).__name__); return []
+    log('PUBLIC: maps out of credit on every token')
+    return []
+
+
 # ---------------- main ----------------
 def todays_pairs():
     n = dt.date.today().toordinal()
@@ -480,12 +520,42 @@ def main():
             prof = social_base(url.split('?')[0], 'linkedin.com') if root(dom(url)) == 'linkedin.com' else ''
             if prof and 'coach' in title.lower() and not NON_TARGET.search(title) and not BAD_REGION.search(title):
                 cands.setdefault('li:' + prof.lower(), {'type': 'li', 'profile': prof, 'city': city, 'name': clean_title(title), 'q': 'exa'})
+    # Google Maps (Apify): real local coach listings with website, phone, rating and reviews.
+    nmaps = 0
+    for kind, city in pairs[-MAPS_PAIRS:]:
+        for it in maps(kind, city, MAPS_PER_SEARCH):
+            title, cat = it.get('title') or '', it.get('categoryName') or ''
+            blob = (title + ' ' + cat).lower()
+            site = it.get('website') or ''
+            if not site or 'coach' not in blob or NON_TARGET.search(blob) or BAD_REGION.search(blob):
+                continue
+            host = root(dom(site))
+            if host in SKIP_DOMAINS or host.endswith(('.gov', '.edu')):
+                continue
+            nmaps += 1
+            key = 'w:' + (dom(site) if root(dom(site)) == dom(site) else host)
+            c0 = cands.setdefault(key, {'type': 'web', 'host': dom(site), 'city': city, 'name': clean_title(title), 'q': 'maps'})
+            c0['maps'] = {'phone': it.get('phone') or '', 'score': it.get('totalScore'), 'reviews': it.get('reviewsCount')}
+    log('PUBLIC: maps places kept', nmaps)
+
+    # Directories: names of coaches listed on coaching directories; the follow-up search below finds their own website.
+    for kind, city in pairs[:4]:
+        short = city.rsplit(' ', 1)[0]
+        for dsite in ('noomii.com', 'bark.com', 'coach.me'):
+            queries += 1
+            for res in search(f'site:{dsite} {kind} {short}'):
+                title, snip = res.get('title', ''), res.get('snippet', '')
+                if root(dom(res.get('url', ''))) != dsite or 'coach' not in (title + snip).lower() or NON_TARGET.search(title + snip) or BAD_REGION.search(title + snip):
+                    continue
+                nm = clean_title(title)
+                if nm and not BAD_TITLE.search(nm) and not GENERIC_NAME.match(nm) and 1 < len(nm.split()) <= 4:
+                    cands.setdefault('d:' + norm(nm), {'type': 'dir', 'city': city, 'name': nm, 'q': 'directory'})
     log('PUBLIC: searches', queries, 'exa', _exa['n'], 'candidates', len(cands))
 
     # LinkedIn people: one more search to find their own site / Instagram.
     fu = 0
     for key, c in list(cands.items()):
-        if c['type'] not in ('li', 'ig', 'fb') or c.get('host') or fu >= FOLLOWUPS_PER_RUN or not c['name'] or norm(c['name']) in have_nm:
+        if c['type'] not in ('li', 'ig', 'fb', 'dir') or c.get('host') or fu >= FOLLOWUPS_PER_RUN or not c['name'] or norm(c['name']) in have_nm:
             continue
         fu += 1
         for res in search(f'"{c["name"]}" coach {c["city"].rsplit(" ", 1)[0]} website OR instagram'):
@@ -516,10 +586,12 @@ def main():
             continue
         if c.get('skip'):
             continue
+        if c['type'] == 'dir' and not c.get('host'):
+            continue
         if c.get('last_post') and (dt.date.today() - dt.date.fromisoformat(c['last_post'])).days > MAX_IDLE_DAYS:
             continue   # Instagram page has gone quiet
         if s and (s['coach'] < 3 or s['therapy'] > s['coach']):
-            if c['type'] == 'web':
+            if c['type'] in ('web', 'dir'):
                 continue   # not a coach site (directory, clinic, school)
             s = None; c = dict(c, host='')   # a social lead keeps going without the wrong website
         name = c['name']
@@ -541,6 +613,8 @@ def main():
         if fb: L['Facebook'] = fb
         if li: L['LinkedIn'] = li
         note = f"AUTO {dt.date.today().isoformat()} | found by {c['q']} dork in {c['city']}"
+        if c.get('maps'):
+            mm = c['maps']; note += ' | Google Maps' + (f" {mm['score']} stars, {mm['reviews']} reviews" if mm.get('score') else '') + (f" | phone {mm['phone']}" if mm.get('phone') else '')
         if s and s['problems']: note += ' | Problem seen: ' + '; '.join(s['problems'])
         if c.get('last_post'): L['Last posted'] = c['last_post']
         if s and s['email']: L['Email'] = s['email']
