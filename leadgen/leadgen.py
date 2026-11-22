@@ -700,11 +700,16 @@ def main():
             for L in leads: print(json.dumps(L))
         return
     has_found = (st or {}).get('found_on', False)
-    if leads and not has_found:
-        has_found = ensure_found_on(base, tables)
+    # 22 Nov: columns can be deleted by hand in Airtable, and an unknown field name rejects the whole batch.
+    # Read the live column names once and write only those.
+    live = {t['id']: {f['name'] for f in t['fields']} for t in at('GET', f'meta/bases/{base}/tables')['tables']}
     for t, rows in by.items():
+        cols = live.get(tables.get(t))
+        if not cols:
+            log('PUBLIC: table missing in Airtable, skipped', t, len(rows))
+            continue
         for i in range(0, len(rows), 10):
-            batch = [{'fields': {k: v for k, v in L.items() if k in FIELDS_OK and (k != 'Found on' or has_found)}} for L in rows[i:i + 10]]
+            batch = [{'fields': {k: v for k, v in L.items() if k in FIELDS_OK and k in cols}} for L in rows[i:i + 10]]
             at('POST', f'{base}/{tables[t]}', {'records': batch, 'typecast': True})
     # Save state only after Airtable accepted the rows, so a failed run is retried next time.
     common.save('leads_seen', {'em': sorted(have_em), 'dom': sorted(have_dom), 'nm': sorted(have_nm),
