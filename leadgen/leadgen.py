@@ -680,7 +680,8 @@ def main():
     def score(L):
         return (5 if L.get('Email') else 0) + (2 if L.get('Website') else 0) + (2 if L.get('Instagram') else 0) + (1 if L.get('Facebook') else 0) \
             + (1 if L.get('LinkedIn') else 0) + (1 if L.get('Last posted') else 0) + (1 if 'exa dork' in L['Claude cross-check'] or 'found by exa' in L['Claude cross-check'] else 0)
-    leads = [L for L in leads if L.get('Email') or L.get('Website') or L.get('Instagram') or L.get('Facebook') or L.get('LinkedIn')]
+    # 22 Nov: the 'No Email or Socials' table was removed, so a lead needs an email or an Instagram/Facebook page to be kept.
+    leads = [L for L in leads if L.get('Email') or L.get('Instagram') or L.get('Facebook')]
     leads.sort(key=score, reverse=True)     # best leads first, so the daily cap never cuts the richest rows
     leads = leads[:DAILY_CAP]
 
