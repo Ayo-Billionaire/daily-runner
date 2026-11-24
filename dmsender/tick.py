@@ -1,6 +1,7 @@
 """Approval tick (22 Nov 2026): the owner ticks `Approve` on a lead row in Airtable; this schedules everything for that lead.
 
-  email: lead added to the live Lumina campaign's list, subject + approved first line set, campaign audience reconciled,
+  email: RETIRED 24 Nov (emails live in the Lumina holding list, dmsender/mover.py moves approved ones; Airtable holds no email text, so this branch never fires).
+         Old text: lead added to the live Lumina campaign's list, subject + approved first line set, campaign audience reconciled,
          read back. The campaign already holds email 1 and the three follow ups (same subject, so they thread as Re:).
   DM:    record id added to state/approved.json, which is the only thing the DM sender is allowed to send.
   The row gets `Scheduled on` only after the read back passes. A failed row stays unticked-for-scheduling and is retried.
@@ -12,6 +13,8 @@
 PUBLIC REPO: only counts are printed (PUBLIC: lines). Names, emails and ids never reach the log."""
 import json, os, re, sys, time, urllib.request, urllib.error, datetime as dt
 from common import CFG, _at, airtable_rows, load, save, commit, today
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'leadgen'))
+import banned   # 24 Nov: every DM goes through the banned words check before it is approved for sending
 
 CAMPAIGN = 'eae37ccd-118b-465c-af9e-9aab162e168e'   # Coaches US: owners, post written for them (live, 7 steps)
 LUMINA = 'https://luminnaleads.com'
@@ -140,7 +143,11 @@ def run_tick():
             else:
                 item['email'] = email
         if (f.get('Cold DM') or '').strip() and (f.get('Instagram') or f.get('Facebook')):
-            item['dm'] = True
+            ok_dm, hits = banned.check(f['Cold DM'])
+            if ok_dm:
+                item['dm'] = True
+            else:
+                item['note'].append('DM refused: banned words ' + ','.join(k for k, v in hits.items() if v))
         plan.append(item)
     log('plan: emails', sum(1 for p in plan if p['email']), '| DMs', sum(1 for p in plan if p['dm']),
         '| nothing to do', sum(1 for p in plan if not p['email'] and not p['dm']))
@@ -227,8 +234,17 @@ def run_tick():
 def main():
     run_tick()
     if YES and '--setup' not in sys.argv:
+        err = None
+        try:
+            import mover      # 24 Nov: emails approved in the Lumina holding list go into the live campaign (dry unless mover.live exists)
+            mover.run()
+        except Exception as e:   # the Sent move below must still run
+            err = e
+            print('PUBLIC: mover failed:', type(e).__name__, flush=True)
         import sentmove   # after every tick: leads whose channels are all done move to the Sent table
         sentmove.run()
+        if err:
+            raise err
 
 
 if __name__ == '__main__':
