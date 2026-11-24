@@ -997,6 +997,7 @@ def main():
     # Read the live column names once and write only those.
     live = {t['id']: {f['name'] for f in t['fields']} for t in at('GET', f'meta/bases/{base}/tables')['tables']}
     new_pend = {}
+    new_enrich = {}
     for t, rows in by.items():
         cols = live.get(tables.get(t))
         if not cols:
@@ -1005,6 +1006,9 @@ def main():
         for i in range(0, len(rows), 10):
             batch = [{'fields': {k: v for k, v in L.items() if k in FIELDS_OK and k in cols}} for L in rows[i:i + 10]]
             made = at('POST', f'{base}/{tables[t]}', {'records': batch, 'typecast': True}).get('records', [])
+            for L_, rec in zip(rows[i:i + 10], made):
+                if L_.get('Website') or L_.get('Instagram'):
+                    new_enrich[rec['id']] = {'t': t, 'site': L_.get('Website', ''), 'ig': L_.get('Instagram', ''), 'em': L_.get('Email', '')}
             if t == SOCIAL_TABLE:
                 for L, rec in zip(rows[i:i + 10], made):
                     if L.get('Website'):
@@ -1016,6 +1020,10 @@ def main():
     for k in list(new_pend):
         pend.setdefault(k, new_pend[k])
     checked, moved = backfill(base, tables, live, pend)
+    if new_enrich:                     # the enrich step (enrich.py) fills owner name, site summary and Instagram posts for these
+        es = common.load('enrich_state', {'q': {}, 'seeded': False, 'done': 0})
+        es['q'].update(new_enrich)
+        common.save('enrich_state', es)
     # Save state only after Airtable accepted the rows, so a failed run is retried next time.
     common.save('leads_seen', {'em': sorted(have_em), 'dom': sorted(have_dom), 'nm': sorted(have_nm), 'pend': pend, 'dirs_extra': dirs_extra, 'dirs_seen': dirs_seen,
                                'refreshed': dt.date.today().isoformat() if stale else st['refreshed'], 'found_on': has_found})

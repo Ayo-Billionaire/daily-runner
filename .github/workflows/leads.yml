@@ -40,6 +40,15 @@ jobs:
           RC=$?
           grep '^PUBLIC:' ../leads.log || true
           exit $RC
+      - name: Enrich new leads (owner name, site summary, Instagram posts)
+        if: always()
+        working-directory: leadgen
+        run: |
+          set +e
+          python enrich.py > ../enrich.log 2>&1
+          RC=$?
+          grep '^PUBLIC:' ../enrich.log || true
+          exit $RC
       - name: Email on failure
         if: failure()
         working-directory: dmsender
