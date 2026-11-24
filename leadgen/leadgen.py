@@ -13,6 +13,7 @@ across all four tables plus the Replied No table, never store a shared inbox.
 """
 import json, os, re, sys, time, ssl, datetime as dt, urllib.request, urllib.parse, urllib.error
 import concurrent.futures as cf
+import html as _html
 
 HERE = os.path.dirname(os.path.abspath(__file__)); sys.path.insert(0, HERE)
 import email_check
@@ -21,7 +22,7 @@ import common   # encrypted state files committed back to the repo (same helper 
 
 DRY = '--dry' in sys.argv
 DAILY_CAP = 150           # new leads written per run (Ayo 21 Nov: 100 to 150 a day)
-PAIRS_PER_RUN = 12        # (kind, city) pairs per run, each searched with 4 dorks + 2 platform footprints
+PAIRS_PER_RUN = 20        # (kind, city) pairs per run, each searched with 4 dorks + 2 platform footprints
 FOLLOWUPS_PER_RUN = 20    # extra searches that look up a LinkedIn person's own site
 FIELDS_OK = {'Business', 'City', 'Website', 'Email', 'Instagram', 'Facebook', 'LinkedIn', 'Claude cross-check', 'Found on', 'Last posted'}
 EXA_CAP = 40              # Exa free plan = $10 a month, about 47 searches a day at $0.007
@@ -62,7 +63,9 @@ UA = 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML,
 NON_TARGET = re.compile(r'\b(gym|fitness|personal train|trainer|bodybuild|yoga|pilates|crossfit|ifbb|hypno|football|basketball|soccer|baseball|volleyball|softball|hockey|lacrosse|swim|sports?|athlet|mma|boxing|golf|tennis|dance|martial|barre|cycling|running|weight ?loss|keto|macros?|physique|muscle|bikini|powerlifting|strength|credit score|credit repair|doula|mortgage|insurance|loan officer|realtor|real estate|dentist|chiropract|massage|tax prep|bookkeep)\b', re.I)
 BAD_TITLE = re.compile(r'(\btop \d*|\bbest \d*|\d+ (best|top)|compared|browse|directory|near me|reviews?\b|how to|find a |list of|\bpost\b|photos and videos|instagram|facebook|\.\.\.|\bwelcome\b|just got|excited|foundation|^about\b|^home\b|\bjobs?\b|hiring|certified coaches)', re.I)
 FREE_MAIL = ('gmail.com', 'yahoo.com', 'outlook.com', 'icloud.com', 'hotmail.com', 'proton.me', 'protonmail.com', 'aol.com', 'live.com', 'me.com')
-ROLE_EXTRA = ('assist', 'assistant', 'coaches', 'coachinfo', 'inquire', 'enquire', 'connect', 'reach', 'talk', 'ask', 'bookme', 'booknow', 'client', 'admin', 'manager', 'support', 'office', 'mail', 'email', 'hello', 'hi', 'info', 'contact', 'team')
+ROLE_EXTRA = ('notice', 'notices', 'studentcare', 'care', 'sales', 'billing', 'press', 'media', 'help', 'service', 'services', 'orders', 'enquiries', 'inquiries',
+              'booking', 'bookings', 'appointments', 'reception', 'privacy', 'legal', 'webmaster', 'noreply', 'donotreply', 'registrar', 'admissions', 'hr', 'jobs',
+              'assist', 'assistant', 'coaches', 'coachinfo', 'inquire', 'enquire', 'connect', 'reach', 'talk', 'ask', 'bookme', 'booknow', 'client', 'admin', 'manager', 'support', 'office', 'mail', 'email', 'hello', 'hi', 'info', 'contact', 'team')
 BAD_REGION = re.compile(r'\b(india|pakistan|bangladesh|nigeria|lagos|karachi|mumbai|delhi|dhaka)\b', re.I)
 EMRE = re.compile(r'[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}')
 BADEM = ('example', 'sentry', 'wixpress', 'domain.com', 'email.com', 'yourname', '.png', '.jpg', '.webp', '.gif', '.svg', 'godaddy',
@@ -144,7 +147,7 @@ def norm(n):
 
 
 def clean_title(t):
-    t = re.sub(r'\s+', ' ', t or '').strip()
+    t = re.sub(r'\s+', ' ', _html.unescape(t or '')).strip()
     t = re.split(r'\s\(@', t)[0]
     t = re.split(r'\s[-|–—·]\s|,\s', t)[0]
     return t.strip(' -|')[:80]
@@ -186,7 +189,71 @@ def soc(html, pat, host):
     return ''
 
 
+EXTRA_PATHS = ('/contact', '/contact-us', '/contact-me', '/about', '/about-me', '/about-us', '/work-with-me', '/connect', '/team',
+               '/meet-the-team', '/hello', '/book', '/book-a-call', '/coaching', '/get-in-touch', '/privacy-policy', '/terms')
+LINK_WORDS = re.compile(r'(about|contact|team|meet|connect|work[- ]with|book|hire|reach|touch|hello|privacy|terms)', re.I)
+AT_WORD = re.compile(r'([A-Za-z0-9._%+-]+)\s*[\[\(\{<]\s*at\s*[\]\)\}>]\s*([A-Za-z0-9.-]+)\s*[\[\(\{<]\s*dot\s*[\]\)\}>]\s*([A-Za-z]{2,})', re.I)
+CFE = re.compile(r'data-cfemail="([0-9a-fA-F]+)"|email-protection#([0-9a-fA-F]+)')
+
+
+def _cf_decode(h):
+    try:
+        k = int(h[:2], 16)
+        return ''.join(chr(int(h[i:i + 2], 16) ^ k) for i in range(2, len(h), 2))
+    except Exception:
+        return ''
+
+
+def _quick_owner_email(base, text):
+    hostroot = root(dom(base))
+    for e in EMRE.findall(text) + re.findall(r'mailto:([^"\'?<>\s]+)', text):
+        e = re.sub(r'^(?:u00a0|u200b|%20)+', '', e.lower().strip('.'))
+        if not re.fullmatch(EMRE.pattern, e) or any(b in e for b in BADEM) or e.endswith(('.edu', '.gov')):
+            continue
+        local, ed = e.split('@')
+        if re.sub(r'[._\-+0-9]+', '', local) in ROLE_EXTRA:
+            continue
+        if ed in FREE_MAIL or root(ed) == hostroot:
+            return True
+    return False
+
+
+def wide_pages(base, html):
+    """Home page plus the pages where a coach puts their own address: contact, about, team, privacy, terms, and any link on the home page that
+    looks like one. Plain free HTTP. Returns text with Cloudflare-protected and 'name [at] site [dot] com' addresses turned into normal ones."""
+    paths = list(EXTRA_PATHS)
+    for h in re.findall(r'href=["\']([^"\'#?]+)', html)[:300]:
+        if h.startswith('/') and not h.startswith('//') and LINK_WORDS.search(h) and h not in paths and len(h) < 60:
+            paths.append(h)
+        elif h.startswith(base) and LINK_WORDS.search(h[len(base):]) and h[len(base):] not in paths and len(h) < 100:
+            paths.append(h[len(base):])
+    out = html
+    got = 0
+    t0 = time.time()
+    for p in paths[:22]:
+        if time.time() - t0 > 30:
+            break          # one slow site must not hold the run
+        t = get(base + p)
+        if t:
+            out += '\n' + t
+            got += 1
+            if _quick_owner_email(base, _html.unescape(out)):
+                break          # an owner address is on the page: no need to read more of this site
+        if got >= 9:
+            break
+    out = _html.unescape(out)
+    extra = ' '.join(_cf_decode(a or b) for a, b in CFE.findall(out))
+    extra += ' ' + ' '.join(f'{a}@{b}.{c}' for a, b, c in AT_WORD.findall(out))
+    return out + '\n' + extra
+
+
+START = time.time()
+SITE_BUDGET = 30 * 60     # seconds into the run after which no new site is opened, so the 30 minute job limit is never hit
+
+
 def check_site(host):
+    if time.time() - START > SITE_BUDGET:
+        return None
     try:
         return _check_site(host)
     except Exception:
@@ -198,14 +265,14 @@ def _check_site(host):
     html = get(base) or get('http://' + host)
     if not html:
         return None
-    pages = html
-    for p in ('/contact',):
-        pages += get(base + p)
+    pages = wide_pages(base, html)
     text = re.sub(r'<[^>]+>', ' ', html).lower()
     coach, therapy = text.count('coach'), text.count('therap') + text.count('counsel')
     ems = []
     for e in EMRE.findall(pages) + re.findall(r'mailto:([^"\'?<>\s]+)', pages):
-        e = e.lower().strip('.')
+        e = re.sub(r'^(?:u00a0|u200b|%20|\xa0|\u200b)+', '', e.lower().strip('.'))
+        if e.endswith(('.edu', '.gov', '.mil')) or '.edu.' in e:
+            continue
         if not re.fullmatch(EMRE.pattern, e) or any(b in e for b in BADEM) or e in ems:
             continue
         ems.append(e)
@@ -474,10 +541,159 @@ def todays_pairs():
     return out
 
 
+# ---------------- coach directories (found 24 Nov 2026, list in directories.json) ----------------
+DIRS_PER_RUN = 10          # directories crawled per run, rotating through the whole list
+DIR_PAGES = 12             # pages followed inside one directory
+DIR_JUNK = ('gmpg.org', 'hubspot.com', 'jsdelivr.net', 'typekit.net', 'optimizecdn.com', 'cdn.', 'w3.org', 'mapbox.com', 'googletagmanager.com',
+            'facebook.net', 'wordpress.com', 'fonts.', 'gstatic', 'cloudfront', 'imagekit', 'jotform', 'ftc.gov', 'wildapricot', 'addtoany.com',
+            'leadconnectorhq', 'unpkg.com', 'cdnjs', 'akamai', 'bootstrap', 'recaptcha', 'zoom.us', 'eventbrite', 'meetup.com', 'spotify',
+            'apple.co', 'goo.gl', 'forms.gle', 'docs.google', 'drive.google', 'amzn', 'nih.gov', 'wikipedia', 'forbes.com', 'indeed.com',
+            'coursera', 'udemy', 'psychologytoday', 'clubexpress', 'coachingfederation', 'calendly', 'mailchimp', 'squarespace.com', 'wix.com',
+            'weebly.com', 'shopify', 'paypal', 'stripe', 'vimeo', 'github', 'bit.ly', 'linktr.ee', 'google.', 'apple.com', 'microsoft')
+
+
+def crawl_directory(d):
+    """One directory: its listing page plus the pagination or sibling listing pages, same site only. Returns (set of outside sites, set of emails)."""
+    start = d['url']
+    h = dom(start)
+    seen, queue, sites, mails = set(), [start], set(), set()
+    prefix = '/' + '/'.join([x for x in urllib.parse.urlparse(start).path.split('/') if x][:1])
+    while queue and len(seen) < DIR_PAGES:
+        u = queue.pop(0)
+        if u in seen:
+            continue
+        seen.add(u)
+        t = _html.unescape(get(u))
+        if not t:
+            continue
+        for m in re.findall(r'href=["\'](https?://[^"\'#\s]+)', t):
+            x = dom(m)
+            if x and root(x) != root(h) and not any(j in x for j in DIR_JUNK) and '.' in x and not any(x == s2 or x.endswith('.' + s2) for s2 in SKIP_DOMAINS):
+                sites.add(x)
+        for e in EMRE.findall(t) + re.findall(r'mailto:([^"\'?<>\s]+)', t):
+            e = e.lower().strip('.')
+            if re.fullmatch(EMRE.pattern, e) and not any(b in e for b in BADEM) and not e.endswith(('.edu', '.gov')):
+                mails.add(e)
+        for m in re.findall(r'href=["\']([^"\'#\s]+)', t):
+            a = urllib.parse.urljoin(u, m).split('#')[0]
+            p = urllib.parse.urlparse(a)
+            if p.netloc.replace('www.', '') == h.replace('www.', '') and a not in seen and a not in queue \
+                    and (re.search(r'[?&/](page|pg|paged|p|start|offset)[=/]?\d+|page_id=\d+|directory|coach|member|find|specialty|categor|webdirectory', a, re.I)) \
+                    and not re.search(r'\.(css|js|png|jpg|pdf|svg|zip)(\?|$)', a):
+                queue.append(a)
+    return sites, mails
+
+
+def harvest(cands, have_dom, have_em):
+    """Adds the coaches' own sites found in the day's directories as site candidates; the normal site check then reads their emails and socials."""
+    p = os.path.join(HERE, 'directories.json')
+    if not os.path.exists(p):
+        return 0, 0
+    dirs = json.load(open(p))
+    n = dt.date.today().toordinal()
+    pick = [dirs[(n * DIRS_PER_RUN + i) % len(dirs)] for i in range(min(DIRS_PER_RUN, len(dirs)))]
+    with cf.ThreadPoolExecutor(10) as ex:
+        res = list(ex.map(crawl_directory, pick))
+    sites_all, mails_all = set(), set()
+    for s_, m_ in res:
+        sites_all |= s_; mails_all |= m_
+    added = 0
+    for x in sites_all:
+        if root(x) in have_dom or ('w:' + x) in cands:
+            continue
+        cands['w:' + x] = {'type': 'web', 'host': x, 'city': 'Directory', 'name': 'Home', 'q': 'directory'}   # name is replaced by the site title
+        added += 1
+    for e in mails_all:
+        ed = e.split('@')[1]
+        if ed in FREE_MAIL or e in have_em:
+            continue
+        r_ = root(ed)
+        if r_ in have_dom or ('w:' + ed) in cands or any(j in ed for j in DIR_JUNK):
+            continue
+        cands['w:' + ed] = {'type': 'web', 'host': ed, 'city': 'Directory', 'name': 'Home', 'q': 'directory'}
+        added += 1
+    return len(pick), added
+
+
+# ---------------- backfill: socials-only leads that have a website ----------------
+SOCIAL_TABLE, EMAIL_TABLE = 'Socials Only (no email)', 'Email and Socials'
+BACKFILL_PER_RUN = 60
+MOVE_FIELDS = ('Business', 'City', 'Website', 'Cold DM', 'Instagram', 'Facebook', 'LinkedIn', 'Source record ID')
+
+
+def seed_pending(base, tables):
+    """One time: every socials-only row with a website, not yet drafted for DM and not approved, waits in line to be re-checked."""
+    out, off = {}, None
+    while True:
+        q = {'pageSize': 100, 'fields[]': ['Business', 'Website', 'DM source post', 'Approve', 'Approve DM', 'Scheduled on']}
+        if off:
+            q['offset'] = off
+        d = at('GET', f'{base}/{tables[SOCIAL_TABLE]}', query=q)
+        for r in d['records']:
+            f = r['fields']
+            if f.get('Website') and not (f.get('DM source post') or f.get('Approve') or f.get('Approve DM') or f.get('Scheduled on')):
+                out[r['id']] = dom(f['Website'])
+        off = d.get('offset')
+        if not off:
+            return out
+
+
+def backfill(base, tables, live, pend):
+    """Re-check waiting socials-only leads with the wide site scan. A lead that turns up an owner email moves to Email and Socials: copy,
+    read back, then delete the old row. Rows ticked, scheduled, sent or approved for DM are never touched. Returns (checked, moved)."""
+    if not pend or EMAIL_TABLE not in tables or SOCIAL_TABLE not in tables:
+        return 0, 0
+    locked = set()
+    try:
+        locked = set(common.load('approved.json', [])) | {v.get('rid') for v in common.load('sent.json', {}).values()}
+    except Exception as e:
+        if os.environ.get('GITHUB_ACTIONS') == 'true':
+            log('PUBLIC: backfill skipped, state unreadable', type(e).__name__)
+            return 0, 0          # never move a row without knowing what is approved or sent
+    ids = [i for i in list(pend)[:BACKFILL_PER_RUN] if i not in locked]
+    for i in list(pend)[:BACKFILL_PER_RUN]:
+        if i in locked:
+            pend.pop(i, None)
+    with cf.ThreadPoolExecutor(24) as ex:
+        scans = dict(zip(ids, ex.map(lambda i: check_site(pend[i]), ids)))
+    dst_cols = live.get(tables[EMAIL_TABLE], set())
+    moved = 0
+    for i in ids:
+        s = scans.get(i)
+        pend.pop(i, None)            # every row is looked at once
+        if not s or not s['email'] or s['coach'] < 3 or s['therapy'] > s['coach']:
+            continue
+        try:
+            old = at('GET', f'{base}/{tables[SOCIAL_TABLE]}/{i}')['fields']
+            if old.get('Approve') or old.get('Approve DM') or old.get('Scheduled on') or old.get('DM source post'):
+                continue
+            nf = {k: old[k] for k in MOVE_FIELDS if old.get(k)}
+            nf['Email'] = s['email']
+            nf['Source record ID'] = i
+            nf['Claude cross-check'] = (old.get('Claude cross-check', '') + f" | Email {s['email']} found on the site by the wide scan {dt.date.today().isoformat()} (moved from {SOCIAL_TABLE})")[:9000]
+            nf = {k: v for k, v in nf.items() if k in dst_cols}
+            if '--bf-dry' in sys.argv:
+                log('PUBLIC: would move', old.get('Business', '')[:30], s['email']); moved += 1; continue
+            new = at('POST', f'{base}/{tables[EMAIL_TABLE]}', {'records': [{'fields': nf}], 'typecast': True})['records'][0]['id']
+            chk = at('GET', f'{base}/{tables[EMAIL_TABLE]}/{new}')['fields']
+            if chk.get('Email') != s['email'] or chk.get('Business') != old.get('Business'):
+                log('PUBLIC: backfill copy did not read back, old row kept')
+                continue
+            at('DELETE', f'{base}/{tables[SOCIAL_TABLE]}/{i}')
+            moved += 1
+        except Exception as e:
+            log('PUBLIC: backfill error', type(e).__name__)
+    return len(ids), moved
+
+
 def main():
     cfg = config(); A = cfg['airtable']; base = A['base']; tables = A['tables']
     if not secret('TINYFISH_API_KEY') or not secret('AIRTABLE_TOKEN'):
         log('PUBLIC: missing TINYFISH_API_KEY or AIRTABLE_TOKEN'); sys.exit(1)
+    if '--bf-dry' in sys.argv:        # read-only rehearsal of the socials-only catch-up
+        live = {t['id']: {f['name'] for f in t['fields']} for t in at('GET', f'meta/bases/{base}/tables')['tables']}
+        pend = seed_pending(base, tables); log('PUBLIC: queue', len(pend))
+        log('PUBLIC: checked, would move', backfill(base, tables, live, pend)); return
     # Known leads live in an encrypted state file, so a daily run costs Airtable only the write calls.
     # Full re-read of Airtable at most once a week (picks up rows Ayo added, moved or deleted by hand).
     st = common.load('leads_seen', None)
@@ -617,6 +833,9 @@ def main():
                 c['host'] = dom(res['url'])
         queries += 1
 
+    dirs_n, dirs_added = harvest(cands, have_dom, have_em)
+    log('PUBLIC: directories crawled', dirs_n, 'new sites from them', dirs_added)
+
     # Firecrawl: Instagram bio link, email and newest post date; LinkedIn location and links. Thin leads first.
     todo = [c for c in cands.values() if c['type'] in ('ig', 'li') and norm(c['name']) not in have_nm]
     todo.sort(key=lambda c: (bool(c.get('host')), c['type'] != 'ig'))
@@ -627,7 +846,7 @@ def main():
 
     # Check each coach's own site for links and a personal email.
     hosts = {c['host'] for c in cands.values() if c.get('host') and root(c['host']) not in have_dom}
-    with cf.ThreadPoolExecutor(32) as ex:
+    with cf.ThreadPoolExecutor(64) as ex:
         sites = dict(zip(hosts, ex.map(check_site, hosts)))
 
     leads, seen_nm = [], set()
@@ -706,6 +925,7 @@ def main():
     # 22 Nov: columns can be deleted by hand in Airtable, and an unknown field name rejects the whole batch.
     # Read the live column names once and write only those.
     live = {t['id']: {f['name'] for f in t['fields']} for t in at('GET', f'meta/bases/{base}/tables')['tables']}
+    new_pend = {}
     for t, rows in by.items():
         cols = live.get(tables.get(t))
         if not cols:
@@ -713,12 +933,25 @@ def main():
             continue
         for i in range(0, len(rows), 10):
             batch = [{'fields': {k: v for k, v in L.items() if k in FIELDS_OK and k in cols}} for L in rows[i:i + 10]]
-            at('POST', f'{base}/{tables[t]}', {'records': batch, 'typecast': True})
+            made = at('POST', f'{base}/{tables[t]}', {'records': batch, 'typecast': True}).get('records', [])
+            if t == SOCIAL_TABLE:
+                for L, rec in zip(rows[i:i + 10], made):
+                    if L.get('Website'):
+                        new_pend[rec['id']] = dom(L['Website'])
+    # Socials-only leads that have a website wait in line for the wide email scan (the seed run lines up the old ones once).
+    pend = dict(st['pend']) if st and 'pend' in st else seed_pending(base, tables)
+    if not (st and 'pend' in st):
+        log('PUBLIC: backfill queue seeded', len(pend))
+    for k in list(new_pend):
+        pend.setdefault(k, new_pend[k])
+    checked, moved = backfill(base, tables, live, pend)
     # Save state only after Airtable accepted the rows, so a failed run is retried next time.
-    common.save('leads_seen', {'em': sorted(have_em), 'dom': sorted(have_dom), 'nm': sorted(have_nm),
+    common.save('leads_seen', {'em': sorted(have_em), 'dom': sorted(have_dom), 'nm': sorted(have_nm), 'pend': pend,
                                'refreshed': dt.date.today().isoformat() if stale else st['refreshed'], 'found_on': has_found})
     common.commit('lead finder state')
     log('PUBLIC: NEW LEADS ADDED', len(leads), counts)
+    new_em = sum(1 for L in leads if L.get('Email'))
+    log('PUBLIC: EMAILS TODAY', new_em + moved, f'(new leads with email {new_em}, socials-only leads that turned up an email {moved} of {checked} re-checked; target 100)')
 
 
 if __name__ == '__main__':

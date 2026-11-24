@@ -14,7 +14,7 @@ jobs:
   find:
     # PUBLIC REPO: only PUBLIC: count lines reach the log. Lead details go to Airtable only.
     runs-on: ubuntu-24.04
-    timeout-minutes: 30
+    timeout-minutes: 55
     env:
       AIRTABLE_TOKEN: ${{ secrets.AIRTABLE_TOKEN }}
       TINYFISH_API_KEY: ${{ secrets.TINYFISH_API_KEY }}
