@@ -3,7 +3,7 @@ on:
   # Started by the Cloudflare Worker clock (clock/worker.js) every day at 04:23 UTC = 05:23 Lagos: GitHub's own schedule never fires here.
   workflow_dispatch:
     inputs:
-      job: { description: 'both (default), find, enrich or drafts', default: 'both' }
+      job: { description: 'both (default), find or enrich', default: 'both' }
 permissions:
   contents: write
 concurrency:
@@ -27,8 +27,6 @@ jobs:
       STATE_KEY: ${{ secrets.STATE_KEY }}
       RESEND_API_KEY: ${{ secrets.RESEND_API_KEY }}
       PRIVATE_CONFIG: ${{ secrets.PRIVATE_CONFIG }}
-      MB_AYODESH: ${{ secrets.MB_AYODESH }}
-      LUMINALEADS_API_KEY: ${{ secrets.LUMINALEADS_API_KEY }}
     steps:
       - uses: actions/checkout@v4
         with: { ref: main }
@@ -55,16 +53,6 @@ jobs:
           grep '^PUBLIC:' ../enrich.log || true
           [ $RC -ne 0 ] && grep -E '^(RuntimeError|KeyError|TypeError|ValueError|[A-Za-z]+Error)' ../enrich.log | head -3
           exit $RC
-      - name: Save email drafts into the mailboxes, then follow-up drafts
-        if: ${{ always() && (inputs.job == '' || inputs.job == 'both' || inputs.job == 'drafts') }}
-        working-directory: leadgen
-        run: |
-          set +e
-          python draftbox.py > ../drafts.log 2>&1; RC1=$?
-          python followups.py >> ../drafts.log 2>&1; RC2=$?
-          grep '^PUBLIC:' ../drafts.log || true
-          [ $RC1 -ne 0 -o $RC2 -ne 0 ] && grep -E '^([A-Za-z]+Error|RuntimeError)' ../drafts.log | head -3
-          exit $((RC1 + RC2))
       - name: Email on failure
         if: failure()
         working-directory: dmsender

@@ -210,7 +210,11 @@ def run_tick():
         what = [w for w, on in (('email', bool(p['email'])), ('DM', p['dm'])) if on]
         if not what:
             continue   # nothing could be scheduled for this row: leave it for the owner to see
-        by_t.setdefault(p['r']['tid'], []).append({'id': p['r']['id'], 'fields': {'Scheduled on': stamp + ' ' + '+'.join(what)}})
+        fld = {'Scheduled on': stamp + ' ' + '+'.join(what)}
+        if p['email']:
+            fld['Draft subject'] = ''   # 24 Nov: Lumina now holds the email (first line + subject, read back above), so Airtable keeps DM text only
+            fld['Draft email'] = ''
+        by_t.setdefault(p['r']['tid'], []).append({'id': p['r']['id'], 'fields': fld})
         done += 1
     for tid, recs in by_t.items():
         for i in range(0, len(recs), 10):
