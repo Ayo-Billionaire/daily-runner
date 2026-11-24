@@ -174,6 +174,10 @@ def close_open_chats(page):
             return
 
 
+GENERIC_HEADINGS = {'facebook', 'chats', 'notifications', 'messenger', 'details', 'featured', 'posts', 'about', 'intro', 'photos', 'friends',
+                    'reels', 'followers', 'links', 'more', 'home', 'search', 'people also like', 'reviews', 'services', 'products', 'events'}
+
+
 def target_name(page, item):
     """Who this chat must be with, read from the profile BEFORE clicking Message.
     Instagram: the handle in the URL. Facebook: the page or profile name in the first visible h1."""
@@ -182,20 +186,30 @@ def target_name(page, item):
         return m.group(1).lower() if m else ''
     # Facebook pages have no h1 and the tab title is just "Facebook" (checked live 17 Nov 2026). The page name is
     # the largest text near the top (32px). Poll up to 25s because the relayed phone link renders slowly.
+    # 24 Nov 2026: read too early, the headings of the page body ("Details", "Featured") are the biggest text and were taken
+    # as the coach name (Skillway: "Write to Details"), or nothing was found yet (B Well, Untapped Learning). So: skip generic
+    # headings, look lower down (tall cover banners push the name below 450 px), and only accept a name seen 3 times in a row.
     js = """() => { let best = null, bs = 0;
         for (const e of document.querySelectorAll('h1,h2,span,div,a')) { const r = e.getBoundingClientRect();
-            if (r.top < 50 || r.top > 450 || r.height === 0) continue; const t = (e.innerText || '').trim();
+            if (r.top < 50 || r.top > 650 || r.height === 0) continue; const t = (e.innerText || '').trim();
             if (!t || t.includes('\\n') || t.length > 80) continue; const fs = parseFloat(getComputedStyle(e).fontSize);
+            if (GENERIC.indexOf(t.toLowerCase()) >= 0) continue;
             if (fs > bs) { bs = fs; best = t; } }
-        return bs >= 20 ? best : ''; }"""
-    deadline = time.time() + 25
+        return bs >= 20 ? best : ''; }""".replace('GENERIC', json.dumps(sorted(GENERIC_HEADINGS)))
+    deadline = time.time() + 30
+    last, seen = '', 0
     while time.time() < deadline:
         try:
             t = (page.evaluate(js) or '').strip()
         except Exception:
             t = ''
-        if t and t.lower() not in ('facebook', 'chats', 'notifications', 'messenger'):
-            return t
+        if t and t.lower() not in GENERIC_HEADINGS:
+            seen = seen + 1 if t == last else 1
+            last = t
+            if seen >= 3:
+                return t
+        else:
+            last, seen = '', 0
         time.sleep(1)
     hs = page.locator('h1')
     for k in range(hs.count()):
@@ -203,7 +217,7 @@ def target_name(page, item):
             t = hs.nth(k).inner_text(timeout=2000).strip()
         except Exception:
             continue
-        if t and t.lower() not in ('facebook', 'chats', 'notifications', 'messenger'):
+        if t and t.lower() not in GENERIC_HEADINGS:
             return t
     # Fallback: the tab title ("(3) Creative Catapult Coaching | Facebook") is set before the page body renders.
     t = re.sub(r'^\(\d+\)\s*', '', page.title() or '')
@@ -256,12 +270,12 @@ def norm(t):
     return re.sub(r'[^a-z0-9]+', '', (t or '').lower())
 
 
-def find_fb_box(page, name):
+def find_fb_box(page, name, wait=40):
     """17 Nov 2026: two DMs went out as PUBLIC COMMENTS because the post comment box ("Comment as <account name>") was
     the first typing box on the page. Facebook labels the Messenger box "Write to <name>" (checked live on a page
     chat and a person chat). Only that box, for THIS coach, is ever typed into."""
     key = norm(name)[:12]
-    deadline = time.time() + 40
+    deadline = time.time() + wait
     while time.time() < deadline:
         loc = page.locator('[contenteditable="true"][aria-label^="Write to "]')
         for k in range(loc.count()):
@@ -294,6 +308,10 @@ def open_chat(page, item):
         raise Stop(f"{item['platform']}: login wall ({lo}) on {item['business']}'s profile; session dropped")
     if item['platform'] == 'instagram' and 'instagram.com/' not in page.url:
         raise Skip(f'Instagram link opened {page.url}')
+    try:   # the header is drawn when the Message button is: wait for it before reading the name (slow phone link, 24 Nov 2026)
+        page.get_by_role('button', name=re.compile(r'^(Message|Send message)$', re.I)).first.wait_for(state='visible', timeout=25000)
+    except Exception:
+        pass
     name = target_name(page, item)
     if not name:
         raise Skip('could not read the coach name on the profile, so the chat cannot be checked')
@@ -311,7 +329,18 @@ def open_chat(page, item):
     time.sleep(random.uniform(3, 6))
     guard(page, 'chat')
     if item['platform'] == 'facebook':
-        box = find_fb_box(page, name)
+        box = find_fb_box(page, name, wait=15)
+        if box is None:
+            # 24 Nov 2026 (Untapped Learning): some Pages open the chat on a "Get started" screen with no typing box until it is
+            # tapped (it only sends Facebook's own start button, no text of ours). Tap it, then wait for the real box.
+            gs = page.locator('[role="button"]:has-text("Get started"), [aria-label="Get started"]').first
+            try:
+                gs.wait_for(state='visible', timeout=3000)
+                gs.click()
+                time.sleep(random.uniform(3, 5))
+                box = find_fb_box(page, name)
+            except Exception:
+                box = find_fb_box(page, name, wait=25)
         if box is None:
             raise Skip(f'message box did not appear (no Messenger box labelled Write to {name})')
         return box
