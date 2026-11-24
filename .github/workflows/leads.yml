@@ -2,6 +2,8 @@ name: leads
 on:
   # Started by the Cloudflare Worker clock (clock/worker.js) every day at 04:23 UTC = 05:23 Lagos: GitHub's own schedule never fires here.
   workflow_dispatch:
+    inputs:
+      job: { description: 'both (default), find or enrich', default: 'both' }
 permissions:
   contents: write
 concurrency:
@@ -33,6 +35,7 @@ jobs:
       - run: git config user.name "runner" && git config user.email "runner@users.noreply.github.com"
       - run: pip install -q cryptography==43.0.3 > /dev/null 2>&1
       - name: Find new coach leads
+        if: ${{ inputs.job != 'enrich' }}
         working-directory: leadgen
         run: |
           set +e
@@ -41,7 +44,7 @@ jobs:
           grep '^PUBLIC:' ../leads.log || true
           exit $RC
       - name: Enrich new leads (owner name, site summary, Instagram posts)
-        if: always()
+        if: ${{ always() && inputs.job != 'find' }}
         working-directory: leadgen
         run: |
           set +e
