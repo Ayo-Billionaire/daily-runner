@@ -20,14 +20,14 @@ sys.path.insert(0, HERE)
 import leadgen as L
 import common
 
-ENRICH_PER_RUN = 60
+ENRICH_PER_RUN = 200            # sites are free to read; Instagram is the limited part (IG_READS)
 IG_READS = 40                      # Firecrawl reads for Instagram per run (4,000 credits a month across the keys, the finder uses 60 a day)
 FIELDS_OF = {}
 LEAD_TABLES = ('Email and Socials', 'Email Only', 'Socials Only (no email)')
 COLS = {'Owner first name': 'singleLineText', 'Site summary': 'multilineText', 'Latest IG posts': 'multilineText',
         'Last IG post date': 'singleLineText', 'Posting gap days': 'singleLineText', 'Enriched on': 'singleLineText'}
 NOT_NAMES = {'coach', 'coaching', 'life', 'wellness', 'info', 'hello', 'contact', 'team', 'admin', 'office', 'support', 'mail', 'email', 'the', 'my', 'live',
-             'your', 'best', 'our', 'advanced', 'mind', 'health', 'business', 'career', 'mindset', 'leadership', 'executive', 'success', 'happy', 'true', 'inner', 'vital', 'dr', 'ms', 'mr', 'mrs'}
+             'your', 'best', 'our', 'advanced', 'mind', 'next', 'new', 'more', 'what', 'why', 'how', 'this', 'that', 'here', 'all', 'one', 'join', 'start', 'take', 'get', 'find', 'let', 'make', 'meet', 'welcome', 'hello', 'about', 'home', 'free', 'book', 'work', 'top', 'real', 'simply', 'just', 'brave', 'bold', 'rise', 'shine', 'bloom', 'grow', 'thrive', 'health', 'business', 'career', 'mindset', 'leadership', 'executive', 'success', 'happy', 'true', 'inner', 'vital', 'dr', 'ms', 'mr', 'mrs'}
 BIZ_WORDS = {'institute', 'academy', 'coaching', 'center', 'centre', 'group', 'llc', 'inc', 'school', 'studio', 'collective', 'solutions', 'consulting',
              'wellness', 'mastery', 'mind', 'advanced', 'international', 'association', 'foundation', 'network', 'training', 'practice', 'ventures', 'partners'}
 NAME_RE = re.compile(r"(?:\bI['’]m|\bI am|\bMy name is|\bHi,? I['’]m|\bHello,? I['’]m|\bHey,? I['’]m|\bMeet)\s+(?:Dr\.?\s+)?([A-Z][a-z]{2,15})\b")
