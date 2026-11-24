@@ -51,6 +51,7 @@ jobs:
           python enrich.py > ../enrich.log 2>&1
           RC=$?
           grep '^PUBLIC:' ../enrich.log || true
+          [ $RC -ne 0 ] && grep -E '^(RuntimeError|KeyError|TypeError|ValueError|[A-Za-z]+Error)' ../enrich.log | head -3
           exit $RC
       - name: Email on failure
         if: failure()

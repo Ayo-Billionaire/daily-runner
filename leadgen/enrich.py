@@ -22,6 +22,7 @@ import common
 
 ENRICH_PER_RUN = 60
 IG_READS = 40                      # Firecrawl reads for Instagram per run (4,000 credits a month across the keys, the finder uses 60 a day)
+FIELDS_OF = {}
 LEAD_TABLES = ('Email and Socials', 'Email Only', 'Socials Only (no email)')
 COLS = {'Owner first name': 'singleLineText', 'Site summary': 'multilineText', 'Latest IG posts': 'multilineText',
         'Last IG post date': 'singleLineText', 'Posting gap days': 'singleLineText', 'Enriched on': 'singleLineText'}
@@ -143,6 +144,8 @@ def ensure_columns(base, tables):
             if name not in have:
                 L.at('POST', f"meta/bases/{base}/tables/{t['id']}/fields", {'name': name, 'type': typ})
                 made += 1
+    global FIELDS_OF
+    FIELDS_OF = {t['name']: {f['name'] for f in t['fields']} | (set(COLS) if made else set()) for t in live if t['name'] in LEAD_TABLES}
     return {t['name']: t['id'] for t in live if t['name'] in LEAD_TABLES}, made
 
 
@@ -151,7 +154,8 @@ def seed(base, tids):
     for name, tid in tids.items():
         off = None
         while True:
-            qq = {'pageSize': 100, 'fields[]': ['Business', 'Website', 'Instagram', 'Email', 'Enriched on']}
+            want = [c for c in ('Business', 'Website', 'Instagram', 'Email', 'Enriched on') if c in FIELDS_OF.get(name, set())]   # tables lack some columns
+            qq = {'pageSize': 100, 'fields[]': want}
             if off:
                 qq['offset'] = off
             d = L.at('GET', f'{base}/{tid}', query=qq)
