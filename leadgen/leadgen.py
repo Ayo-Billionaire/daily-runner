@@ -584,12 +584,78 @@ def crawl_directory(d):
     return sites, mails
 
 
-def harvest(cands, have_dom, have_em):
+# ---------------- daily discovery of new directories (so the list grows by itself) ----------------
+DISC_QUERIES_PER_RUN = 12
+DISC_BAD = re.compile(r'(football|athletic|k12|\.edu|\.gov|hockey|basketball|soccer|baseball|sports|chamber|school|college|univers|church|\.co\.uk|\.uk$|\.in$|\.pk$|\.ng$)', re.I)
+DISC_STATES = ['Alabama', 'Alaska', 'Arizona', 'Arkansas', 'California', 'Colorado', 'Connecticut', 'Delaware', 'Florida', 'Georgia', 'Hawaii', 'Idaho', 'Illinois',
+               'Indiana', 'Iowa', 'Kansas', 'Kentucky', 'Louisiana', 'Maine', 'Maryland', 'Massachusetts', 'Michigan', 'Minnesota', 'Mississippi', 'Missouri',
+               'Montana', 'Nebraska', 'Nevada', 'New Hampshire', 'New Jersey', 'New Mexico', 'New York', 'North Carolina', 'North Dakota', 'Ohio', 'Oklahoma',
+               'Oregon', 'Pennsylvania', 'Rhode Island', 'South Carolina', 'South Dakota', 'Tennessee', 'Texas', 'Utah', 'Vermont', 'Virginia', 'Washington',
+               'West Virginia', 'Wisconsin', 'Wyoming']
+DISC_NICHES = ['life coach', 'business coach', 'executive coach', 'career coach', 'ADHD coach', 'health coach', 'wellness coach', 'mindset coach', 'relationship coach',
+               'leadership coach', 'spiritual coach', 'money coach', 'confidence coach', 'transformational coach', 'parenting coach', 'nutrition coach', 'holistic coach',
+               'small business coach', 'sales coach', 'burnout coach', 'grief coach', 'menopause coach', 'christian life coach', 'mentor coach', 'NLP coach',
+               'divorce coach', 'retirement coach', 'writing coach', 'public speaking coach', 'trauma informed coach', 'women entrepreneur coach', 'productivity coach']
+
+
+def disc_queries(n):
+    """The day's search phrases: a different slice every day, state chapters and niche directories mixed."""
+    out = []
+    for i in range(DISC_QUERIES_PER_RUN):
+        k = n * DISC_QUERIES_PER_RUN + i
+        if k % 2 == 0:
+            st_ = DISC_STATES[(k // 2) % len(DISC_STATES)]
+            out.append([f'ICF {st_} chapter find a coach member directory', f'{st_} life coach directory members list website',
+                        f'{st_} business coaches directory association members', f'{st_} coaches association member directory find a coach'][(k // 2 // len(DISC_STATES)) % 4])
+        else:
+            nc = DISC_NICHES[(k // 2) % len(DISC_NICHES)]
+            out.append([f'{nc} directory find a {nc} member listings', f'list of {nc}s directory website email contact',
+                        f'{nc} certified practitioners directory United States'][(k // 2 // len(DISC_NICHES)) % 3])
+    return out
+
+
+def discover_directories(known):
+    """Searches for directory pages, opens the top page of each new site, and keeps it if it shows enough coach websites or emails.
+    Returns the list of new directories [{domain, url, score}] and the set of every domain looked at today."""
+    seen_now, urls = set(), {}
+    for q in disc_queries(dt.date.today().toordinal()):
+        for r in search(q):
+            h = dom(r['url'])
+            if not h or h in known or root(h) in known or DISC_BAD.search(h) or any(h == d or h.endswith('.' + d) for d in SKIP_DOMAINS):
+                continue
+            urls.setdefault(h, r['url'])
+    def test(h):
+        seen_now.add(h)
+        u = urls[h]
+        t = _html.unescape(get(u))
+        if not t:
+            return None
+        sites, mails = set(), set()
+        for m in re.findall(r'href=["\'](https?://[^"\'#\s]+)', t):
+            x = dom(m)
+            if x and root(x) != root(h) and not any(j in x for j in DIR_JUNK) and '.' in x and not any(x == s2 or x.endswith('.' + s2) for s2 in SKIP_DOMAINS):
+                sites.add(x)
+        for e in EMRE.findall(t) + re.findall(r'mailto:([^"\'?<>\s]+)', t):
+            e = e.lower().strip('.')
+            if re.fullmatch(EMRE.pattern, e) and not any(b in e for b in BADEM) and not e.endswith(('.edu', '.gov')) \
+                    and re.sub(r'[._\-+0-9]+', '', e.split('@')[0]) not in ROLE_EXTRA and root(e.split('@')[1]) != root(h):
+                mails.add(e)
+        score = len(sites) + 2 * len(mails)
+        low = t.lower()
+        if score >= 30 and ('coach' in low) and low.count('coach') >= 10 and not NON_TARGET.search(h):
+            return {'domain': h, 'url': u, 'score': score}
+        return None
+    with cf.ThreadPoolExecutor(16) as ex:
+        found = [x for x in ex.map(test, list(urls)) if x]
+    return found, seen_now
+
+
+def harvest(cands, have_dom, have_em, extra=()):
     """Adds the coaches' own sites found in the day's directories as site candidates; the normal site check then reads their emails and socials."""
     p = os.path.join(HERE, 'directories.json')
     if not os.path.exists(p):
         return 0, 0
-    dirs = json.load(open(p))
+    dirs = json.load(open(p)) + list(extra)
     n = dt.date.today().toordinal()
     pick = [dirs[(n * DIRS_PER_RUN + i) % len(dirs)] for i in range(min(DIRS_PER_RUN, len(dirs)))]
     with cf.ThreadPoolExecutor(10) as ex:
@@ -833,7 +899,12 @@ def main():
                 c['host'] = dom(res['url'])
         queries += 1
 
-    dirs_n, dirs_added = harvest(cands, have_dom, have_em)
+    known_dirs = {d['domain'] for d in json.load(open(os.path.join(HERE, 'directories.json')))} | {d['domain'] for d in (st or {}).get('dirs_extra', [])} | set((st or {}).get('dirs_seen', []))
+    new_dirs, dirs_looked = discover_directories(known_dirs)
+    dirs_extra = list((st or {}).get('dirs_extra', [])) + new_dirs
+    dirs_seen = sorted(set((st or {}).get('dirs_seen', [])) | dirs_looked)[-3000:]
+    log('PUBLIC: directory search looked at', len(dirs_looked), 'new sites, kept', len(new_dirs), 'as directories, list now', len(dirs_extra) + len(json.load(open(os.path.join(HERE, 'directories.json')))))
+    dirs_n, dirs_added = harvest(cands, have_dom, have_em, dirs_extra)
     log('PUBLIC: directories crawled', dirs_n, 'new sites from them', dirs_added)
 
     # Firecrawl: Instagram bio link, email and newest post date; LinkedIn location and links. Thin leads first.
@@ -946,7 +1017,7 @@ def main():
         pend.setdefault(k, new_pend[k])
     checked, moved = backfill(base, tables, live, pend)
     # Save state only after Airtable accepted the rows, so a failed run is retried next time.
-    common.save('leads_seen', {'em': sorted(have_em), 'dom': sorted(have_dom), 'nm': sorted(have_nm), 'pend': pend,
+    common.save('leads_seen', {'em': sorted(have_em), 'dom': sorted(have_dom), 'nm': sorted(have_nm), 'pend': pend, 'dirs_extra': dirs_extra, 'dirs_seen': dirs_seen,
                                'refreshed': dt.date.today().isoformat() if stale else st['refreshed'], 'found_on': has_found})
     common.commit('lead finder state')
     log('PUBLIC: NEW LEADS ADDED', len(leads), counts)
