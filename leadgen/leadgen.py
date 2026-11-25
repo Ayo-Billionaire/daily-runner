@@ -103,6 +103,8 @@ _last = [0.0]
 
 def search(q):
     """TinyFish Search (free, 30 a minute). Returns [{title, url, snippet}]."""
+    if over(SEARCH_STOP + 1):
+        return []
     wait = 2.4 - (time.time() - _last[0])
     if wait > 0:
         time.sleep(wait)
@@ -248,7 +250,24 @@ def wide_pages(base, html):
 
 
 START = time.time()
-SITE_BUDGET = 30 * 60     # seconds into the run after which no new site is opened, so the 30 minute job limit is never hit
+# 25 Nov 2026: the 04:23 run ran past the 55 minute job limit, was cancelled, and everything it had found was lost (leads are only written at the end).
+# Every phase now has a time budget (minutes from the start), so the run always reaches the save step. LEADGEN_BUDGET_SCALE shrinks them for tests.
+SCALE = float(os.environ.get('LEADGEN_BUDGET_SCALE', '1'))
+SEARCH_STOP = 22          # no new search, Exa, Maps, SerpApi or follow up query after this many minutes
+DIRS_STOP = 27            # no directory discovery or crawl after this
+FC_STOP = 29              # no Firecrawl reads after this
+SITE_STOP = 36            # no new coach site is opened after this (sites already opened finish)
+HARD_STOP = 51            # only if the run is somehow still before the Airtable write at this minute: fail loudly (the write itself needs about 2 minutes of the 55)
+SITE_BUDGET = SITE_STOP * 60 * SCALE
+WRITING = [False]
+
+
+def over(minutes):
+    return time.time() - START > minutes * 60 * SCALE
+
+
+def mins():
+    return round((time.time() - START) / 60 / SCALE, 1)
 
 
 def check_site(host):
@@ -356,7 +375,7 @@ _exa = {'n': 0, 'dead': False}
 
 
 def exa(q, category=None, n=10):
-    if _exa['dead'] or _exa['n'] >= EXA_CAP or not secret('EXA_API_KEY'):
+    if _exa['dead'] or _exa['n'] >= EXA_CAP or not secret('EXA_API_KEY') or over(SEARCH_STOP + 1):
         return []
     _exa['n'] += 1
     body = {'query': q, 'numResults': n, 'type': 'auto'}
@@ -782,6 +801,9 @@ def main():
     cands, queries = {}, 0   # key -> lead dict
     pairs = todays_pairs()
     for kind, city in pairs:
+        if over(SEARCH_STOP):
+            log('PUBLIC: search time budget reached, minute', mins(), 'searches so far', queries)
+            break
         short = city.rsplit(' ', 1)[0]
         dorks = [
             ('web', f'"{kind}" "{city}" ("free discovery call" OR "book a call" OR "work with me") -site:linkedin.com -site:facebook.com -site:instagram.com -site:yelp.com'),
@@ -821,6 +843,8 @@ def main():
                     cands.setdefault(key, {'type': kindtag, 'profile': prof, 'city': city, 'name': clean_title(title), 'q': kindtag})
     # Exa (free plan): coaches' own sites and LinkedIn profiles, cleaner than dorks.
     for kind, city in pairs:
+        if over(SEARCH_STOP):
+            break
         short = city.rsplit(' ', 1)[0]
         for res in exa(f'independent {kind} in {short} personal coaching website book a free discovery call'):
             url, title = res.get('url', ''), res.get('title') or ''
@@ -838,6 +862,8 @@ def main():
     big = CITIES[:30]
     n0 = dt.date.today().toordinal()
     for i in range(MAPS_SEARCHES):
+        if over(SEARCH_STOP):
+            break
         kind, city = MAPS_KINDS[(n0 + i) % len(MAPS_KINDS)], big[(n0 * MAPS_SEARCHES + i * 7) % len(big)]
         for it in maps(kind, city, MAPS_PER_SEARCH):
             title, cat = it.get('title') or '', it.get('categoryName') or ''
@@ -852,11 +878,13 @@ def main():
             key = 'w:' + (dom(site) if root(dom(site)) == dom(site) else host)
             c0 = cands.setdefault(key, {'type': 'web', 'host': dom(site), 'city': city, 'name': clean_title(title), 'q': 'maps'})
             c0['maps'] = {'phone': it.get('phone') or '', 'score': it.get('totalScore'), 'reviews': it.get('reviewsCount')}
-    log('PUBLIC: maps places kept', nmaps)
+    log('PUBLIC: maps places kept', nmaps, 'minute', mins())
 
     # SerpApi: Google results pages 2 to 5, where small coaches with weak sites sit (Scouting Systems PDF, page 20).
     nserp = 0
     for kind, city in pairs[:2]:
+        if over(SEARCH_STOP):
+            break
         q = f'"{kind}" "{city}" ("free discovery call" OR "book a call" OR "work with me") -site:linkedin.com -site:facebook.com -site:instagram.com -site:yelp.com'
         for start in (10, 20, 30, 40):
             for res in serp(q, start):
@@ -869,10 +897,12 @@ def main():
                     continue
                 nserp += 1
                 cands.setdefault('w:' + (dom(url) if root(dom(url)) == dom(url) else host), {'type': 'web', 'host': dom(url), 'city': city, 'name': clean_title(title), 'q': 'serpapi'})
-    log('PUBLIC: serpapi results kept', nserp)
+    log('PUBLIC: serpapi results kept', nserp, 'minute', mins())
 
     # Directories: names of coaches listed on coaching directories; the follow-up search below finds their own website.
     for kind, city in pairs[:4]:
+        if over(SEARCH_STOP):
+            break
         short = city.rsplit(' ', 1)[0]
         for dsite in DIRECTORY_SITES:
             queries += 1
@@ -883,12 +913,12 @@ def main():
                 nm = clean_title(title)
                 if nm and not BAD_TITLE.search(nm) and not GENERIC_NAME.match(nm) and 1 < len(nm.split()) <= 4:
                     cands.setdefault('d:' + norm(nm), {'type': 'dir', 'city': city, 'name': nm, 'q': 'directory'})
-    log('PUBLIC: searches', queries, 'exa', _exa['n'], 'candidates', len(cands))
+    log('PUBLIC: searches', queries, 'exa', _exa['n'], 'candidates', len(cands), 'minute', mins())
 
     # LinkedIn people: one more search to find their own site / Instagram.
     fu = 0
     for key, c in list(cands.items()):
-        if c['type'] not in ('li', 'ig', 'fb', 'dir') or c.get('host') or fu >= FOLLOWUPS_PER_RUN or not c['name'] or norm(c['name']) in have_nm:
+        if c['type'] not in ('li', 'ig', 'fb', 'dir') or c.get('host') or fu >= FOLLOWUPS_PER_RUN or not c['name'] or norm(c['name']) in have_nm or over(SEARCH_STOP):
             continue
         fu += 1
         for res in search(f'"{c["name"]}" coach {c["city"].rsplit(" ", 1)[0]} website OR instagram'):
@@ -900,25 +930,26 @@ def main():
         queries += 1
 
     known_dirs = {d['domain'] for d in json.load(open(os.path.join(HERE, 'directories.json')))} | {d['domain'] for d in (st or {}).get('dirs_extra', [])} | set((st or {}).get('dirs_seen', []))
-    new_dirs, dirs_looked = discover_directories(known_dirs)
+    new_dirs, dirs_looked = ([], set()) if over(DIRS_STOP) else discover_directories(known_dirs)
     dirs_extra = list((st or {}).get('dirs_extra', [])) + new_dirs
     dirs_seen = sorted(set((st or {}).get('dirs_seen', [])) | dirs_looked)[-3000:]
     log('PUBLIC: directory search looked at', len(dirs_looked), 'new sites, kept', len(new_dirs), 'as directories, list now', len(dirs_extra) + len(json.load(open(os.path.join(HERE, 'directories.json')))))
-    dirs_n, dirs_added = harvest(cands, have_dom, have_em, dirs_extra)
-    log('PUBLIC: directories crawled', dirs_n, 'new sites from them', dirs_added)
+    dirs_n, dirs_added = (0, 0) if over(DIRS_STOP) else harvest(cands, have_dom, have_em, dirs_extra)
+    log('PUBLIC: directories crawled', dirs_n, 'new sites from them', dirs_added, 'minute', mins())
 
     # Firecrawl: Instagram bio link, email and newest post date; LinkedIn location and links. Thin leads first.
     todo = [c for c in cands.values() if c['type'] in ('ig', 'li') and norm(c['name']) not in have_nm]
     todo.sort(key=lambda c: (bool(c.get('host')), c['type'] != 'ig'))
-    todo = todo[:FC_CAP]
+    todo = [] if over(FC_STOP) else todo[:FC_CAP]
     with cf.ThreadPoolExecutor(6) as ex:
         list(ex.map(lambda c: enrich_ig(c) if c['type'] == 'ig' else enrich_li(c), todo))
-    log('PUBLIC: firecrawl reads', _fc['n'])
+    log('PUBLIC: firecrawl reads', _fc['n'], 'minute', mins())
 
     # Check each coach's own site for links and a personal email.
     hosts = {c['host'] for c in cands.values() if c.get('host') and root(c['host']) not in have_dom}
     with cf.ThreadPoolExecutor(64) as ex:
         sites = dict(zip(hosts, ex.map(check_site, hosts)))
+    log('PUBLIC: sites checked', len(hosts), 'readable', sum(1 for v in sites.values() if v), 'minute', mins())
 
     leads, seen_nm = [], set()
     for key, c in cands.items():
@@ -992,6 +1023,10 @@ def main():
         if '--show' in sys.argv:
             for L in leads: print(json.dumps(L))
         return
+    if over(HARD_STOP):
+        log('PUBLIC: HARD STOP at minute', mins(), 'before saving, found', len(leads), 'leads; failing so the email goes out')
+        sys.exit(3)
+    WRITING[0] = True
     has_found = (st or {}).get('found_on', False)
     # 22 Nov: columns can be deleted by hand in Airtable, and an unknown field name rejects the whole batch.
     # Read the live column names once and write only those.
@@ -1028,9 +1063,12 @@ def main():
     common.save('leads_seen', {'em': sorted(have_em), 'dom': sorted(have_dom), 'nm': sorted(have_nm), 'pend': pend, 'dirs_extra': dirs_extra, 'dirs_seen': dirs_seen,
                                'refreshed': dt.date.today().isoformat() if stale else st['refreshed'], 'found_on': has_found})
     common.commit('lead finder state')
-    log('PUBLIC: NEW LEADS ADDED', len(leads), counts)
+    log('PUBLIC: NEW LEADS ADDED', len(leads), counts, 'minute', mins())
     new_em = sum(1 for L in leads if L.get('Email'))
     log('PUBLIC: EMAILS TODAY', new_em + moved, f'(new leads with email {new_em}, socials-only leads that turned up an email {moved} of {checked} re-checked; target 100)')
+    if not leads:
+        log('PUBLIC: ZERO NEW LEADS SAVED, counted as a failed run so the email goes out')
+        sys.exit(2)
 
 
 if __name__ == '__main__':

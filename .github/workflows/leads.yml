@@ -39,9 +39,9 @@ jobs:
         working-directory: leadgen
         run: |
           set +e
-          python leadgen.py > ../leads.log 2>&1
-          RC=$?
-          grep '^PUBLIC:' ../leads.log || true
+          # live progress: PUBLIC: lines appear in the Actions log as each phase ends, so a cancelled run still shows how far it got
+          python -u leadgen.py 2>&1 | tee ../leads.log | grep --line-buffered '^PUBLIC:'
+          RC=${PIPESTATUS[0]}
           exit $RC
       - name: Enrich new leads (owner name, site summary, Instagram posts)
         if: ${{ always() && (inputs.job == '' || inputs.job == 'both' || inputs.job == 'enrich') }}
@@ -57,4 +57,4 @@ jobs:
         if: failure()
         working-directory: dmsender
         run: |
-          python3 -c "from common import email, run_link; email('LEAD FINDER ERROR: daily job failed', 'The daily coach lead finder failed. Run: ' + run_link())" > /dev/null 2>&1
+          LOGTXT="$(grep -h '^PUBLIC:' ../leads.log ../enrich.log 2>/dev/null | head -40)" python3 -c "import os; from common import email, run_link; email('LEAD FINDER ERROR: daily job failed', 'The daily coach lead finder failed or saved no new leads. Run: ' + run_link() + chr(10) + chr(10) + 'Counts from the run (minutes are from the start):' + chr(10) + os.environ.get('LOGTXT', 'no counts were printed'))" > /dev/null 2>&1
