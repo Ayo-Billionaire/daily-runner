@@ -19,7 +19,7 @@ import tick   # lumina(), CAMPAIGN, LUMINA, lumina_key(), live_campaign_emails()
 HOLDING = '73198061-2507-4b18-a45e-cbd5809704ea'
 MAX_PER_RUN = 20          # per tick, three ticks a day; the campaign sends 50 a day at most
 LIVE = os.path.exists(os.path.join(os.path.dirname(HERE), 'mover.live'))
-MARK = re.compile(r'^in Lumina (\d{4}-\d{2}-\d{2})(?:T(\d{2}:\d{2})Z)? \| subject: (.+)$')
+MARK = re.compile(r'^in Lumina (\d{4}-\d{2}-\d{2})(?:T(\d{2}:\d{2})Z)? \| subject: (.*?)( \| by hand)?$')
 AUTO_HOURS = 12           # an email nobody approved or denied goes out this long after it was written
 TABLES = ('Email and Socials', 'Email Only')
 
@@ -111,7 +111,7 @@ def marked_rows():
                         ts = dt.datetime.now(dt.timezone.utc)   # date only marker written today: treat as just written, never early
                     else:
                         ts = dt.datetime.fromisoformat(m.group(1) + 'T00:00:00+00:00')
-                    out[em] = (tid, r['id'], m.group(3).strip(), ts)
+                    out[em] = (tid, r['id'], m.group(3).strip(), ts, bool(m.group(4)))
             offset = j.get('offset')
             if not offset:
                 break
@@ -145,8 +145,10 @@ def run():
     plan, refused = [], {}
     for r in approved:
         em = r['email'].lower()
-        tid, rid, subject, _ts = marks[em]
-        bad = check_text(subject, r.get('firstLine') or '')
+        tid, rid, subject, _ts, by_hand = marks[em]
+        # Ayo's own edits and approvals are never blocked: the checks only guard emails that send by themselves.
+        human = by_hand or r.get('firstLineStatus') == 'approved'
+        bad = (None if ((r.get('firstLine') or '').strip() and subject) else 'empty') if human else check_text(subject, r.get('firstLine') or '')
         if not bad and em in elsewhere:
             bad = 'already in campaign ' + elsewhere[em]
         if bad:
