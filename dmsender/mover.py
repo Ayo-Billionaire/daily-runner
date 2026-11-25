@@ -19,7 +19,8 @@ import tick   # lumina(), CAMPAIGN, LUMINA, lumina_key(), live_campaign_emails()
 HOLDING = '73198061-2507-4b18-a45e-cbd5809704ea'
 MAX_PER_RUN = 20          # per tick, three ticks a day; the campaign sends 50 a day at most
 LIVE = os.path.exists(os.path.join(os.path.dirname(HERE), 'mover.live'))
-MARK = re.compile(r'^in Lumina (\d{4}-\d{2}-\d{2}) \| subject: (.+)$')
+MARK = re.compile(r'^in Lumina (\d{4}-\d{2}-\d{2})(?:T(\d{2}:\d{2})Z)? \| subject: (.+)$')
+AUTO_HOURS = 12           # an email nobody approved or denied goes out this long after it was written
 TABLES = ('Email and Socials', 'Email Only')
 
 
@@ -107,7 +108,13 @@ def marked_rows():
                 m = MARK.match((r['fields'].get('Drafted to') or '').strip())
                 em = (r['fields'].get('Email') or '').strip().lower()
                 if m and em:
-                    out[em] = (tid, r['id'], m.group(2).strip())
+                    if m.group(2):
+                        ts = dt.datetime.fromisoformat(m.group(1) + 'T' + m.group(2) + ':00+00:00')
+                    elif m.group(1) == dt.datetime.now(dt.timezone.utc).strftime('%Y-%m-%d'):
+                        ts = dt.datetime.now(dt.timezone.utc)   # date only marker written today: treat as just written, never early
+                    else:
+                        ts = dt.datetime.fromisoformat(m.group(1) + 'T00:00:00+00:00')
+                    out[em] = (tid, r['id'], m.group(3).strip(), ts)
             offset = j.get('offset')
             if not offset:
                 break
@@ -117,8 +124,16 @@ def marked_rows():
 def run():
     marks = marked_rows()
     rows = holding_rows(HOLDING)
-    approved = [r for r in rows if r.get('firstLineStatus') in ('approved', 'edited') and (r.get('email') or '').lower() in marks]
-    log('holding rows', len(rows), '| ready (written, marked)', len(approved), '| mode', 'LIVE' if LIVE else 'DRY')
+    now = dt.datetime.now(dt.timezone.utc)
+    def ready(r):
+        st = r.get('firstLineStatus')
+        em = (r.get('email') or '').lower()
+        if em not in marks:
+            return False
+        return st == 'approved' or (st == 'edited' and now - marks[em][3] >= dt.timedelta(hours=AUTO_HOURS))
+    approved = [r for r in rows if ready(r)]
+    waiting = sum(1 for r in rows if r.get('firstLineStatus') == 'edited' and (r.get('email') or '').lower() in marks) - sum(1 for r in approved if r.get('firstLineStatus') == 'edited')
+    log('holding rows', len(rows), '| ready to move', len(approved), '| still waiting for review', max(waiting, 0), '| mode', 'LIVE' if LIVE else 'DRY')
     if not approved:
         return
 
@@ -133,7 +148,7 @@ def run():
     plan, refused = [], {}
     for r in approved:
         em = r['email'].lower()
-        tid, rid, subject = marks[em]
+        tid, rid, subject, _ts = marks[em]
         bad = check_text(subject, r.get('firstLine') or '')
         if not bad and em in elsewhere:
             bad = 'already in campaign ' + elsewhere[em]
@@ -188,12 +203,12 @@ def run():
     log('Lumina read back: recipients', before, '->', st1.get('recipients', 0), '| proven in list', len(proven), 'of', len(plan))
 
     # 4. Airtable markers
-    stamp = dt.datetime.now(dt.timezone.utc).strftime('%Y-%m-%d %H:%MZ')
+    stamp = dt.datetime.now(dt.timezone.utc).strftime('%Y-%m-%dT%H:%MZ')
     a = CFG['airtable']
     by_t = {}
     for p in plan:
         if p['email'] in proven:
-            by_t.setdefault(p['tid'], []).append({'id': p['rid'], 'fields': {'Drafted to': f'moved {stamp}'}})
+            by_t.setdefault(p['tid'], []).append({'id': p['rid'], 'fields': {'Drafted to': f"moved {stamp} | subject: {p['subject']}"}})
     for tid, recs in by_t.items():
         for i in range(0, len(recs), 10):
             _at('PATCH', f"{a['base']}/{tid}", body={'records': recs[i:i + 10], 'typecast': True})
