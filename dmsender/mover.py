@@ -1,8 +1,8 @@
 """Mover (24 Nov 2026): emails the owner APPROVED in the Lumina holding list go into the live campaign.
 
   holding list 73198061 (no campaign uses it) -> the routine writes each email there, first line status `edited`.
-  The owner opens the list page in Lumina, edits if wanted, presses Approve (status `approved`).
-  This job takes only `approved` rows, checks them against the banned words and the email rules, imports the contact into the
+  25 Nov 2026 (Ayo): no manual approval. This job takes every row whose first line status is `edited` (written by the routine)
+  or `approved` (approved by hand), checks them against the banned words and the email rules, imports the contact into the
   live campaign's list, sets the approved first line and the subject, reconciles the campaign, reads back, then marks Airtable.
   The subject comes from the Airtable marker `in Lumina <date> | subject: <subject>` (Lumina cannot return it).
 
@@ -17,7 +17,7 @@ from common import CFG, _at
 import tick   # lumina(), CAMPAIGN, LUMINA, lumina_key(), live_campaign_emails(), DASHES
 
 HOLDING = '73198061-2507-4b18-a45e-cbd5809704ea'
-MAX_PER_RUN = 40          # the campaign sends 50 a day at most
+MAX_PER_RUN = 20          # per tick, three ticks a day; the campaign sends 50 a day at most
 LIVE = os.path.exists(os.path.join(os.path.dirname(HERE), 'mover.live'))
 MARK = re.compile(r'^in Lumina (\d{4}-\d{2}-\d{2}) \| subject: (.+)$')
 TABLES = ('Email and Socials', 'Email Only')
@@ -28,8 +28,9 @@ def log(*a):
 
 
 def check_text(subject, text):
-    """Everything that must hold before a real send. Returns None when fine, else a short reason."""
-    if not subject or len(subject.split()) > 7 or '|' in subject or ':' in subject:
+    """Everything that must hold before a real send, with nobody reading it first. Returns None when fine, else a short reason.
+    Two styles pass: 1 = point + other topics + system line + closing; 2 = point + a finished post in quotes + two more offered."""
+    if not subject or len(subject.split()) > 7 or '|' in subject or ':' in subject or subject != subject.lower() or '{{' in subject:
         return 'subject'
     if any(d in text or d in subject for d in tick.DASHES):
         return 'dash'
@@ -39,10 +40,23 @@ def check_text(subject, text):
         return 'question marks'
     if not text.rstrip().endswith('\nAyo'):
         return 'sign off'
-    if '{{' in text or '}}' in text or 'http' in text.lower():
+    if '{{' in text or '}}' in text or '<' in text or '>' in text or 'http' in text.lower() or '@' in text:
         return 'merge field or link'
-    if len(text.split()) > 95:
-        return 'too long'
+    first = text.split('\n', 1)[0]
+    if not re.match(r"^Hi( [A-Z][A-Za-z'.\-]{1,24})?,$", first):
+        return 'greeting'
+    n = len(text.split())
+    if n > 100 or n < 45:
+        return 'length'
+    quoted = re.findall(r'"([^"]+)"', text)
+    if len(quoted) > 1:
+        return 'quotes'
+    if quoted:
+        if '?' in quoted[0] or len(quoted[0].split()) > 40 or len(quoted[0].split()) < 12:
+            return 'quoted post'
+        if 'I wrote you one from it:' not in text or 'My system writes posts like this and publishes each one after you say yes.' not in text \
+                or not text.rstrip().endswith('Would it be a bad idea if I wrote you two more?\n\nAyo'):
+            return 'style 2 lines'
     ok, hits = banned.check(text + '\n' + subject)
     if not ok:
         return 'banned ' + ','.join(k for k, v in hits.items() if v and (k != 'avoid' or len(v) >= 2))
@@ -103,8 +117,8 @@ def marked_rows():
 def run():
     marks = marked_rows()
     rows = holding_rows(HOLDING)
-    approved = [r for r in rows if r.get('firstLineStatus') == 'approved' and (r.get('email') or '').lower() in marks]
-    log('holding rows', len(rows), '| approved and marked', len(approved), '| mode', 'LIVE' if LIVE else 'DRY')
+    approved = [r for r in rows if r.get('firstLineStatus') in ('approved', 'edited') and (r.get('email') or '').lower() in marks]
+    log('holding rows', len(rows), '| ready (written, marked)', len(approved), '| mode', 'LIVE' if LIVE else 'DRY')
     if not approved:
         return
 

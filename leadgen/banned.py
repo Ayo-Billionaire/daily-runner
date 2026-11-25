@@ -31,7 +31,7 @@ AVOID = [
 NICHE = [
     r'copywrit\w+', r'content creator', r'i help (?:busy )?coaches', r'i came across', r'i noticed', r'hope this finds you', r'quick question',
     r'loved your post', r'following up', r'just checking', r'circling back', r'bumping', r'leverag\w+', r'streamlin\w+', r'elevat\w+', r'unlock\w*',
-    r'game[- ]?chang\w+', r'journey', r'delve', r'synerg\w+', r'\bhacks?\b', r'\bguru\b', r'i wrote you a post', r'my system writes posts',
+    r'game[- ]?chang\w+', r'journey', r'delve', r'synerg\w+', r'\bhacks?\b', r'\bguru\b', r'i wrote you a post',
     r'interested\?', r'want to see it\?', r'would you be open',
 ]
 
