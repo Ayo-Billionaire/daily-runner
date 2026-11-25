@@ -55,9 +55,6 @@ def check_text(subject, text):
     if quoted:
         if '?' in quoted[0] or len(quoted[0].split()) > 40 or len(quoted[0].split()) < 12:
             return 'quoted post'
-        if 'I wrote you one from it:' not in text or 'My system writes posts like this and publishes each one after you say yes.' not in text \
-                or not text.rstrip().endswith('Would it be a bad idea if I wrote you two more?\n\nAyo'):
-            return 'style 2 lines'
     ok, hits = banned.check(text + '\n' + subject)
     if not ok:
         return 'banned ' + ','.join(k for k, v in hits.items() if v and (k != 'avoid' or len(v) >= 2))
