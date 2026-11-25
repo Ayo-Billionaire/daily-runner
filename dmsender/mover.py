@@ -47,7 +47,7 @@ def check_text(subject, text):
     if not re.match(r"^Hi( [A-Z][A-Za-z'.\-]{1,24})?,$", first):
         return 'greeting'
     n = len(text.split())
-    if n > 100 or n < 45:
+    if n > 120 or n < 45:   # 25 Nov: 120, the new system line makes style 2 emails about 110 words
         return 'length'
     quoted = re.findall(r'"([^"]+)"', text)
     if len(quoted) > 1:
