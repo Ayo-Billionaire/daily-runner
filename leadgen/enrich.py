@@ -31,7 +31,8 @@ COLS = {'Owner first name': 'singleLineText', 'Site summary': 'multilineText', '
         'Latest FB posts': 'multilineText', 'Last FB post date': 'singleLineText',
         'Latest LinkedIn posts': 'multilineText', 'Last LinkedIn post date': 'singleLineText',
         'Newest post platform': 'singleLineText', 'Newest post date': 'singleLineText', 'Posts researched on': 'singleLineText',
-        'FB post link': 'url', 'LinkedIn post link': 'url', 'IG post link': 'url', 'Source link': 'url'}
+        'FB post link': 'url', 'LinkedIn post link': 'url', 'IG post link': 'url', 'Source link': 'url',
+        'Site ideas': 'multilineText', 'Site read on': 'singleLineText'}
 NOT_NAMES = {'coach', 'coaching', 'life', 'wellness', 'info', 'hello', 'contact', 'team', 'admin', 'office', 'support', 'mail', 'email', 'the', 'my', 'live',
              'your', 'best', 'our', 'advanced', 'mind', 'next', 'new', 'more', 'what', 'why', 'how', 'this', 'that', 'here', 'all', 'one', 'join', 'start', 'take', 'get', 'find', 'let', 'make', 'meet', 'welcome', 'hello', 'about', 'home', 'free', 'book', 'work', 'top', 'real', 'simply', 'just', 'brave', 'bold', 'rise', 'shine', 'bloom', 'grow', 'thrive', 'health', 'business', 'career', 'mindset', 'leadership', 'executive', 'success', 'happy', 'true', 'inner', 'vital', 'dr', 'ms', 'mr', 'mrs'}
 BIZ_WORDS = {'institute', 'academy', 'coaching', 'center', 'centre', 'group', 'llc', 'inc', 'school', 'studio', 'collective', 'solutions', 'consulting',
@@ -88,6 +89,85 @@ def site_facts(host):
         name = m.group(1)
     summary = (desc + ' | ' if desc else '') + body[:600]
     return name, re.sub(r'\s+', ' ', summary).strip()[:900], text
+
+
+SITES_PER_RUN = int(os.environ.get('SITES_PER_RUN', '200'))   # free: plain page reads, no paid service
+FEED_PATHS = ('/feed', '/blog/feed', '/rss.xml', '/blog?format=rss', '/blog/rss.xml', '/feed.xml', '/index.xml')
+ABOUT_PATHS = ('/about', '/about-me', '/about-us', '/my-story', '/meet-me', '/our-story', '/bio')
+
+
+def _clean(t):
+    return re.sub(r'\s+', ' ', _html.unescape(re.sub(r'<[^>]+>', ' ', re.sub(r'(?is)<!\[CDATA\[|\]\]>', '', t or '')))).strip()
+
+
+def newest_blog(base):
+    """Newest blog post from the site's RSS feed (WordPress /feed, Squarespace ?format=rss, Wix/Ghost rss.xml): date, title, opening text."""
+    for p in FEED_PATHS:
+        x = L.get(base + p)
+        if not x or ('<rss' not in x[:600] and '<feed' not in x[:600]):
+            continue
+        best = None
+        for m in re.finditer(r'(?is)<(item|entry)\b(.*?)</\1>', x):
+            body = m.group(2)
+            title = _clean((re.search(r'(?is)<title[^>]*>(.*?)</title>', body) or [None, ''])[1])
+            when = (re.search(r'(?is)<(pubDate|published|updated|dc:date)[^>]*>(.*?)</\1>', body) or [None, None, ''])[2].strip()
+            text = _clean((re.search(r'(?is)<(content:encoded|description|summary|content)[^>]*>(.*?)</\1>', body) or [None, None, ''])[2])
+            d = ''
+            try:
+                if re.match(r'\d{4}-\d\d-\d\d', when):
+                    d = when[:10]
+                elif when:
+                    import email.utils as eu
+                    d = eu.parsedate_to_datetime(when).date().isoformat()
+            except Exception:
+                d = ''
+            if title and d and (best is None or d > best[0]):
+                best = (d, title, text[:600])
+        if best:
+            return best
+    return None
+
+
+def site_ideas(host):
+    """More of the website than the 900 character Site summary: the full About page text and the newest blog post. Returns the field text or ''."""
+    base = 'https://' + host
+    parts = []
+    for p in ABOUT_PATHS:
+        h = L.get(base + p)
+        if h:
+            t = visible(h)
+            if len(t) > 200:
+                parts.append('About page: ' + t[:1500]); break
+    b = newest_blog(base)
+    if b:
+        parts.append(f'Newest blog post ({b[0]}): {b[1]}. {b[2]}')
+    return '\n'.join(parts)
+
+
+def run_sites(base_id, tids):
+    """Third step: read more of each lead's website, free, for leads with a Website and no 'Site read on' date."""
+    q = {}
+    for name, tid in tids.items():
+        have = FIELDS_OF.get(name, set())
+        if 'Website' not in have or 'Site read on' not in have:
+            continue
+        d = L.at('GET', f'{base_id}/{tid}', query={'pageSize': 100, 'fields[]': ['Website'], 'filterByFormula': "AND({Website}!='',NOT({Site read on}))"})
+        for r in d['records']:
+            q[r['id']] = (name, r['fields'].get('Website', ''))
+    ids = list(q)[:SITES_PER_RUN]
+    log('sites queue taking', len(ids))
+    if not ids:
+        return
+    with cf.ThreadPoolExecutor(12) as ex:
+        res = list(ex.map(lambda i: site_ideas(L.dom(q[i][1])), ids))
+    today = dt.date.today().isoformat(); by = {}
+    for i, txt in zip(ids, res):
+        f = {'Site read on': today}
+        if txt:
+            f['Site ideas'] = txt
+        by.setdefault(q[i][0], []).append({'id': i, 'fields': f})
+    wrote = sum(len(patch_safely(base_id, tids[t], recs)) for t, recs in by.items())
+    log('SITES READ', wrote, '| with more site text', sum(1 for t in res if t), '| with a blog post', sum(1 for t in res if 'Newest blog post' in t))
 
 
 POST_RE = re.compile(r'-\s*\[(.+?)\]\((https?://(?:www\.)?instagram\.com/(?:p|reel)/[^)\s]+)\)\s*·\s*(20\d\d-\d\d-\d\d)')
@@ -383,6 +463,10 @@ def main():
             run_posts(base, tids)
         except Exception as e:
             log('posts step failed', type(e).__name__)
+        try:
+            run_sites(base, tids)
+        except Exception as e:
+            log('sites step failed', type(e).__name__)
     have = lambda k: sum(1 for r in res if r.get(k))
     log('ENRICHED', wrote, '| owner name', have('Owner first name'), '| site summary', have('Site summary'), '| instagram posts', have('Latest IG posts'),
         '| left in queue', len(st['q']), '| instagram reads', L._fc['n'])
