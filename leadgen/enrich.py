@@ -248,6 +248,13 @@ def posts_queue(base, tids):
     return dict(list(q.items())[:POSTS_PER_RUN])
 
 
+def err_tag(e):
+    """Public-log safe: the HTTP code and Airtable's error type only, never the message (it can quote a value)."""
+    m = str(e)
+    code = re.search(r'HTTP (\d+)', m); typ = re.search(r'"type":\s*"([A-Z_]+)"', m)
+    return type(e).__name__ + ' ' + (code.group(1) if code else '-') + ' ' + (typ.group(1) if typ else '-')
+
+
 def patch_safely(base, tid, recs):
     """Write 10 at a time; if a batch fails, write its records one by one so one bad record cannot sink the rest."""
     ok = set()
@@ -256,12 +263,14 @@ def patch_safely(base, tid, recs):
         try:
             L.at('PATCH', f'{base}/{tid}', {'records': batch, 'typecast': True}); ok |= {x['id'] for x in batch}
         except Exception as e:
-            log('patch failed, retrying one by one', type(e).__name__)
+            log('patch failed, retrying one by one', err_tag(e))
             for x in batch:
                 try:
                     L.at('PATCH', f'{base}/{tid}', {'records': [x], 'typecast': True}); ok.add(x['id'])
                 except Exception as e2:
-                    log('record patch failed', type(e2).__name__)
+                    log('record patch failed', err_tag(e2), '| fields', ','.join(sorted(x['fields'])))
+                    if 'HTTP 404' in str(e2) or 'ROW_DOES_NOT_EXIST' in str(e2):
+                        ok.add(x['id'])                      # the record was deleted or moved: drop it from the queue so it cannot block the next run
     return ok
 
 
@@ -349,12 +358,8 @@ def main():
         tid = tids.get(t)
         if not tid:
             continue
-        for k in range(0, len(recs), 10):
-            try:
-                L.at('PATCH', f'{base}/{tid}', {'records': recs[k:k + 10], 'typecast': True})
-                wrote += len(recs[k:k + 10]); ok_ids |= {x['id'] for x in recs[k:k + 10]}
-            except Exception as e:
-                log('patch failed, kept in queue', type(e).__name__)
+        got = patch_safely(base, tid, recs)
+        wrote += len(got); ok_ids |= got
     for i in ok_ids:
         st['q'].pop(i, None)
     st['done'] = st.get('done', 0) + wrote
