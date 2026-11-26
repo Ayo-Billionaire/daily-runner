@@ -13,7 +13,7 @@ three lead tables. Each run takes ENRICH_PER_RUN leads. PUBLIC REPO: only counts
   python3 enrich.py           does it
   python3 enrich.py --sample  prints what it would write for 3 leads, writes nothing
 """
-import sys, os, re, json, datetime as dt, concurrent.futures as cf
+import sys, os, re, json, time, datetime as dt, concurrent.futures as cf
 import html as _html
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
@@ -22,10 +22,15 @@ import common
 
 ENRICH_PER_RUN = 200            # sites are free to read; Instagram is the limited part (IG_READS)
 IG_READS = 40                      # Firecrawl reads for Instagram per run (4,000 credits a month across the keys, the finder uses 60 a day)
+POSTS_PER_RUN = int(os.environ.get('POSTS_PER_RUN', '60'))   # leads whose newest posts are read through Apify per run (about $0.015 a lead, 26 Nov test)
+POST_BATCH = 15                                              # profile URLs per Apify call
 FIELDS_OF = {}
 LEAD_TABLES = ('Email and Socials', 'Email Only', 'Socials Only (no email)')
 COLS = {'Owner first name': 'singleLineText', 'Site summary': 'multilineText', 'Latest IG posts': 'multilineText',
-        'Last IG post date': 'singleLineText', 'Posting gap days': 'singleLineText', 'Enriched on': 'singleLineText'}
+        'Last IG post date': 'singleLineText', 'Posting gap days': 'singleLineText', 'Enriched on': 'singleLineText',
+        'Latest FB posts': 'multilineText', 'Last FB post date': 'singleLineText',
+        'Latest LinkedIn posts': 'multilineText', 'Last LinkedIn post date': 'singleLineText',
+        'Newest post platform': 'singleLineText', 'Newest post date': 'singleLineText', 'Posts researched on': 'singleLineText'}
 NOT_NAMES = {'coach', 'coaching', 'life', 'wellness', 'info', 'hello', 'contact', 'team', 'admin', 'office', 'support', 'mail', 'email', 'the', 'my', 'live',
              'your', 'best', 'our', 'advanced', 'mind', 'next', 'new', 'more', 'what', 'why', 'how', 'this', 'that', 'here', 'all', 'one', 'join', 'start', 'take', 'get', 'find', 'let', 'make', 'meet', 'welcome', 'hello', 'about', 'home', 'free', 'book', 'work', 'top', 'real', 'simply', 'just', 'brave', 'bold', 'rise', 'shine', 'bloom', 'grow', 'thrive', 'health', 'business', 'career', 'mindset', 'leadership', 'executive', 'success', 'happy', 'true', 'inner', 'vital', 'dr', 'ms', 'mr', 'mrs'}
 BIZ_WORDS = {'institute', 'academy', 'coaching', 'center', 'centre', 'group', 'llc', 'inc', 'school', 'studio', 'collective', 'solutions', 'consulting',
@@ -133,6 +138,150 @@ def enrich_one(item):
     return out
 
 
+# ---------------- newest posts on Facebook, Instagram and LinkedIn through Apify (added 26 Nov 2026) ----------------
+_ap_dead = set()
+POSTS_BUDGET_SEC = 14 * 60            # the whole job has 55 minutes and the finder takes about 30; leads not reached keep no marker and go first next run
+_t0 = [None]
+APIFY_ACTORS = {'fb': 'apify~facebook-posts-scraper', 'li': 'harvestapi~linkedin-profile-posts', 'ig': 'apify~instagram-post-scraper'}
+
+
+def apify_run(kind, urls):
+    """One Apify call for a batch of profile URLs. Walks the token pool; a token that answers 401/402/403/429 is skipped for the rest of the run."""
+    body = {'fb': {'startUrls': [{'url': u} for u in urls], 'resultsLimit': 2},
+            'li': {'targetUrls': urls, 'maxPosts': 2},
+            'ig': {'username': urls, 'resultsLimit': 2}}[kind]
+    toks = [t for t in L.apify_tokens() if t not in _ap_dead]
+    for t in toks:
+        try:
+            r = L.urllib.request.urlopen(L.urllib.request.Request(
+                f'https://api.apify.com/v2/acts/{APIFY_ACTORS[kind]}/run-sync-get-dataset-items?token={t}&timeout=280',
+                data=json.dumps(body).encode(), headers={'Content-Type': 'application/json'}), timeout=300)
+            return json.load(r)
+        except L.urllib.error.HTTPError as e:
+            if e.code in (401, 402, 403, 429):
+                _ap_dead.add(t); continue
+            log('apify http', kind, e.code); return None
+        except Exception as e:
+            log('apify error', kind, type(e).__name__); return None
+    log('apify: no token with credit left')
+    return None
+
+
+def _slug(u):
+    return re.sub(r'[?#].*$', '', u or '').rstrip('/').split('/')[-1].lower()
+
+
+def _fmt(posts):
+    posts = sorted(posts, key=lambda x: x[0], reverse=True)[:2]
+    return '\n'.join(d + ': ' + re.sub(r'\s+', ' ', t).strip()[:500] for d, t in posts), posts[0][0]
+
+
+def post_research(items):
+    """items: {record id: {'fb','li','ig' urls}}. Returns {record id: fields}. Own posts only; a record with no readable post just gets the marker."""
+    found = {k: {} for k in ('fb', 'li', 'ig')}                 # url -> [(date, text)]
+    _t0[0] = time.time(); stopped = set()
+    for kind in ('fb', 'li', 'ig'):
+        urls = sorted({v[kind] for v in items.values() if v.get(kind)})
+        for k in range(0, len(urls), POST_BATCH):
+            if time.time() - _t0[0] > POSTS_BUDGET_SEC:
+                stopped.add(kind); break
+            chunk = urls[k:k + POST_BATCH]
+            data = apify_run(kind, chunk)
+            for r in data or []:
+                if r.get('error'):
+                    continue
+                if kind == 'fb':
+                    key, d, t = r.get('inputUrl') or r.get('topLevelUrl') or '', (r.get('time') or '')[:10], r.get('text') or ''
+                elif kind == 'ig':
+                    key, d, t = r.get('inputUrl') or '', (r.get('timestamp') or '')[:10], r.get('caption') or ''
+                else:
+                    q = r.get('query') or {}
+                    key = q.get('targetUrl') or ''
+                    d, t = ((r.get('postedAt') or {}).get('date') or '')[:10], r.get('content') or ''
+                    me = _slug(key)
+                    au = r.get('author') or {}
+                    if (au.get('publicIdentifier') or _slug(au.get('linkedinUrl'))).lower() != me:
+                        continue                                 # someone else's post that the profile shared, not their own words
+                if key and d and t.strip():
+                    found[kind].setdefault(key, []).append((d, t))
+    names = {'fb': 'FB', 'li': 'LinkedIn', 'ig': 'IG'}
+    out = {}
+    for rid, v in items.items():
+        f, newest = {}, []
+        for kind in ('fb', 'li', 'ig'):
+            posts = found[kind].get(v.get(kind) or '')
+            if posts:
+                lines, nd = _fmt(posts)
+                if kind != 'ig':
+                    f[f'Latest {names[kind]} posts'] = lines
+                    f[f'Last {names[kind]} post date'] = nd
+                elif not v.get('has_ig'):                        # Firecrawl read already filled Instagram; Apify only fills the gap
+                    f['Latest IG posts'] = lines
+                    f['Last IG post date'] = nd
+                    f['Posting gap days'] = str((dt.date.today() - dt.date.fromisoformat(nd)).days)
+                newest.append((nd, names[kind]))
+        if newest:
+            nd, nm = max(newest)
+            f['Newest post platform'] = nm
+            f['Newest post date'] = nd
+        if any(v.get(k) for k in stopped):
+            continue                                         # a platform was not reached in time: leave the lead unmarked for the next run
+        f['Posts researched on'] = dt.date.today().isoformat()
+        out[rid] = f
+    return out
+
+
+def posts_queue(base, tids):
+    """Leads with a Facebook, Instagram or LinkedIn link and no 'Posts researched on' date. Clearing that date puts a lead back in line."""
+    q = {}
+    for name, tid in tids.items():
+        have = FIELDS_OF.get(name, set())
+        want = [c for c in ('Instagram', 'Facebook', 'LinkedIn', 'Latest IG posts', 'Posts researched on') if c in have]
+        socials = [c for c in ('Facebook', 'LinkedIn', 'Instagram') if c in have]
+        if not socials or 'Posts researched on' not in have:
+            continue
+        formula = 'AND(NOT({Posts researched on}),OR(' + ','.join('{%s}' % c for c in socials) + '))'
+        d = L.at('GET', f'{base}/{tid}', query={'pageSize': min(100, POSTS_PER_RUN), 'fields[]': want, 'filterByFormula': formula})
+        for r in d['records']:
+            f = r['fields']
+            q[r['id']] = {'t': name, 'fb': f.get('Facebook', ''), 'li': f.get('LinkedIn', ''), 'ig': f.get('Instagram', ''), 'has_ig': bool(f.get('Latest IG posts'))}
+    return dict(list(q.items())[:POSTS_PER_RUN])
+
+
+def patch_safely(base, tid, recs):
+    """Write 10 at a time; if a batch fails, write its records one by one so one bad record cannot sink the rest."""
+    ok = set()
+    for k in range(0, len(recs), 10):
+        batch = recs[k:k + 10]
+        try:
+            L.at('PATCH', f'{base}/{tid}', {'records': batch, 'typecast': True}); ok |= {x['id'] for x in batch}
+        except Exception as e:
+            log('patch failed, retrying one by one', type(e).__name__)
+            for x in batch:
+                try:
+                    L.at('PATCH', f'{base}/{tid}', {'records': [x], 'typecast': True}); ok.add(x['id'])
+                except Exception as e2:
+                    log('record patch failed', type(e2).__name__)
+    return ok
+
+
+def run_posts(base, tids):
+    q = posts_queue(base, tids)
+    log('posts queue taking', len(q))
+    if not q:
+        return
+    res = post_research(q)
+    by = {}
+    for rid, f in res.items():
+        by.setdefault(q[rid]['t'], []).append({'id': rid, 'fields': f})
+    wrote = 0
+    for t, recs in by.items():
+        wrote += len(patch_safely(base, tids[t], recs))
+    have = lambda k: sum(1 for f in res.values() if f.get(k))
+    log('POSTS RESEARCHED', wrote, '| facebook', have('Latest FB posts'), '| linkedin', have('Latest LinkedIn posts'), '| instagram filled', have('Latest IG posts'),
+        '| with a newest post', have('Newest post platform'), '| dead tokens', len(_ap_dead))
+
+
 def ensure_columns(base, tables):
     live = L.at('GET', f'meta/bases/{base}/tables')['tables']
     made = 0
@@ -211,6 +360,11 @@ def main():
     st['done'] = st.get('done', 0) + wrote
     common.save('enrich_state', st)
     common.commit('enrich state')
+    if '--no-posts' not in sys.argv:
+        try:
+            run_posts(base, tids)
+        except Exception as e:
+            log('posts step failed', type(e).__name__)
     have = lambda k: sum(1 for r in res if r.get(k))
     log('ENRICHED', wrote, '| owner name', have('Owner first name'), '| site summary', have('Site summary'), '| instagram posts', have('Latest IG posts'),
         '| left in queue', len(st['q']), '| instagram reads', L._fc['n'])
