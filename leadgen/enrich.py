@@ -30,7 +30,8 @@ COLS = {'Owner first name': 'singleLineText', 'Site summary': 'multilineText', '
         'Last IG post date': 'singleLineText', 'Posting gap days': 'singleLineText', 'Enriched on': 'singleLineText',
         'Latest FB posts': 'multilineText', 'Last FB post date': 'singleLineText',
         'Latest LinkedIn posts': 'multilineText', 'Last LinkedIn post date': 'singleLineText',
-        'Newest post platform': 'singleLineText', 'Newest post date': 'singleLineText', 'Posts researched on': 'singleLineText'}
+        'Newest post platform': 'singleLineText', 'Newest post date': 'singleLineText', 'Posts researched on': 'singleLineText',
+        'FB post link': 'url', 'LinkedIn post link': 'url', 'IG post link': 'url', 'Source link': 'url'}
 NOT_NAMES = {'coach', 'coaching', 'life', 'wellness', 'info', 'hello', 'contact', 'team', 'admin', 'office', 'support', 'mail', 'email', 'the', 'my', 'live',
              'your', 'best', 'our', 'advanced', 'mind', 'next', 'new', 'more', 'what', 'why', 'how', 'this', 'that', 'here', 'all', 'one', 'join', 'start', 'take', 'get', 'find', 'let', 'make', 'meet', 'welcome', 'hello', 'about', 'home', 'free', 'book', 'work', 'top', 'real', 'simply', 'just', 'brave', 'bold', 'rise', 'shine', 'bloom', 'grow', 'thrive', 'health', 'business', 'career', 'mindset', 'leadership', 'executive', 'success', 'happy', 'true', 'inner', 'vital', 'dr', 'ms', 'mr', 'mrs'}
 BIZ_WORDS = {'institute', 'academy', 'coaching', 'center', 'centre', 'group', 'llc', 'inc', 'school', 'studio', 'collective', 'solutions', 'consulting',
@@ -95,10 +96,10 @@ POST_RE = re.compile(r'-\s*\[(.+?)\]\((https?://(?:www\.)?instagram\.com/(?:p|re
 def ig_facts(url):
     md = L.firecrawl(url)
     if not md:
-        return '', '', '', ''
+        return '', '', '', '', ''
     posts = POST_RE.findall(md)
     if not posts:
-        return '', '', '', ''
+        return '', '', '', '', ''
     posts = sorted(posts, key=lambda x: x[2], reverse=True)[:3]
     lines = '\n'.join(f"{d}: {re.sub(chr(10), ' ', c).strip()}" for c, _u, d in posts)
     newest = posts[0][2]
@@ -107,7 +108,7 @@ def ig_facts(url):
     m = re.match(r'#\s*([^\n(@]+?)\s*(?:\(@|\n)', md)
     if m:
         title = m.group(1).strip()
-    return lines, newest, str(gap), title
+    return lines, newest, str(gap), title, posts[0][1]
 
 
 def enrich_one(item):
@@ -121,9 +122,10 @@ def enrich_one(item):
         name = n2
     title = ''
     if item.get('ig'):
-        lines, newest, gap, title = ig_facts(item['ig'])
+        lines, newest, gap, title, link = ig_facts(item['ig'])
         if lines:
             out['Latest IG posts'] = lines
+            out['IG post link'] = link
             out['Last IG post date'] = newest
             out['Posting gap days'] = gap
         text += ' ' + title + ' ' + lines
@@ -173,7 +175,7 @@ def _slug(u):
 
 def _fmt(posts):
     posts = sorted(posts, key=lambda x: x[0], reverse=True)[:2]
-    return '\n'.join(d + ': ' + re.sub(r'\s+', ' ', t).strip()[:500] for d, t in posts), posts[0][0]
+    return '\n'.join(d + ': ' + re.sub(r'\s+', ' ', t).strip()[:500] for d, t, _u in posts), posts[0][0], posts[0][2]
 
 
 def post_research(items):
@@ -191,19 +193,19 @@ def post_research(items):
                 if r.get('error'):
                     continue
                 if kind == 'fb':
-                    key, d, t = r.get('inputUrl') or r.get('topLevelUrl') or '', (r.get('time') or '')[:10], r.get('text') or ''
+                    key, d, t, u = r.get('inputUrl') or r.get('topLevelUrl') or '', (r.get('time') or '')[:10], r.get('text') or '', r.get('url') or ''
                 elif kind == 'ig':
-                    key, d, t = r.get('inputUrl') or '', (r.get('timestamp') or '')[:10], r.get('caption') or ''
+                    key, d, t, u = r.get('inputUrl') or '', (r.get('timestamp') or '')[:10], r.get('caption') or '', r.get('url') or ''
                 else:
                     q = r.get('query') or {}
                     key = q.get('targetUrl') or ''
-                    d, t = ((r.get('postedAt') or {}).get('date') or '')[:10], r.get('content') or ''
+                    d, t, u = ((r.get('postedAt') or {}).get('date') or '')[:10], r.get('content') or '', r.get('linkedinUrl') or ''
                     me = _slug(key)
                     au = r.get('author') or {}
                     if (au.get('publicIdentifier') or _slug(au.get('linkedinUrl'))).lower() != me:
                         continue                                 # someone else's post that the profile shared, not their own words
                 if key and d and t.strip():
-                    found[kind].setdefault(key, []).append((d, t))
+                    found[kind].setdefault(key, []).append((d, t, u))
     names = {'fb': 'FB', 'li': 'LinkedIn', 'ig': 'IG'}
     out = {}
     for rid, v in items.items():
@@ -211,14 +213,18 @@ def post_research(items):
         for kind in ('fb', 'li', 'ig'):
             posts = found[kind].get(v.get(kind) or '')
             if posts:
-                lines, nd = _fmt(posts)
+                lines, nd, link = _fmt(posts)
                 if kind != 'ig':
                     f[f'Latest {names[kind]} posts'] = lines
                     f[f'Last {names[kind]} post date'] = nd
+                    if link:
+                        f[f'{names[kind]} post link'] = link
                 elif not v.get('has_ig'):                        # Firecrawl read already filled Instagram; Apify only fills the gap
                     f['Latest IG posts'] = lines
                     f['Last IG post date'] = nd
                     f['Posting gap days'] = str((dt.date.today() - dt.date.fromisoformat(nd)).days)
+                    if link:
+                        f['IG post link'] = link
                 newest.append((nd, names[kind]))
         if newest:
             nd, nm = max(newest)
