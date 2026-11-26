@@ -1,0 +1,53 @@
+name: fbtest
+# Throwaway test (26 Nov 2026): can the free facebook-pages-scraper read public Facebook pages from GitHub's servers?
+# PUBLIC REPO: the log prints only counts and ages. The Airtable secret is only in the first step; the scraper step has no secrets.
+on:
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  t:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/setup-python@v5
+        with: { python-version: '3.12' }
+      - name: Get 8 Facebook links (the only step with a secret)
+        env:
+          AIRTABLE_TOKEN: ${{ secrets.AIRTABLE_TOKEN }}
+        run: |
+          python3 - <<'EOF'
+          import json, os, urllib.request, urllib.parse
+          q = urllib.parse.urlencode([('filterByFormula', "AND(FIND('AUTO 2026-11-2',{Claude cross-check}),{Facebook}!='')"), ('pageSize', '8'), ('fields[]', 'Facebook')])
+          r = urllib.request.Request('https://api.airtable.com/v0/appcE0I9iwBPnYLEw/tblJfjRJCy630zAWG?' + q, headers={'Authorization': 'Bearer ' + os.environ['AIRTABLE_TOKEN']})
+          urls = [x['fields']['Facebook'] for x in json.load(urllib.request.urlopen(r, timeout=30))['records']]
+          json.dump(urls, open('/tmp/urls.json', 'w'))
+          print('PUBLIC: links read', len(urls))
+          EOF
+      - name: Install the scraper
+        run: python3 -m venv /tmp/v && /tmp/v/bin/pip install -q facebook-pages-scraper 2>&1 | tail -2
+      - name: Test (no secrets in this step)
+        run: |
+          cat > /tmp/probe.py <<'EOF'
+          import json, re, io, contextlib, datetime
+          from facebook_page_scraper import FacebookPageScraper
+          urls = json.load(open('/tmp/urls.json'))
+          ok = 0
+          for i, u in enumerate(urls, 1):
+              buf = io.StringIO()
+              with contextlib.redirect_stdout(buf):
+                  try:
+                      posts = FacebookPageScraper.PagePostInfo(u)
+                  except Exception as e:
+                      posts = None
+              note = re.sub(r'https?://\S+', '<url>', buf.getvalue().strip())[:100]
+              if not posts:
+                  print('PUBLIC: lead', i, 'no post |', note); continue
+              p = posts[0]; t = p.get('creation_time')
+              d = datetime.datetime.fromtimestamp(int(t), datetime.timezone.utc).date() if t else None
+              age = (datetime.date(2026, 11, 26) - d).days if d else None
+              ok += 1
+              print('PUBLIC: lead', i, 'post returned | age in days', age, '| has text', bool((p.get('text') or '').strip()))
+          print('PUBLIC: RESULT', ok, 'of', len(urls), 'pages returned a latest post from GitHub servers')
+          EOF
+          /tmp/v/bin/python -I /tmp/probe.py
