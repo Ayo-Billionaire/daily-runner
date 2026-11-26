@@ -22,8 +22,8 @@ import common
 
 ENRICH_PER_RUN = 200            # sites are free to read; Instagram is the limited part (IG_READS)
 IG_READS = 40                      # Firecrawl reads for Instagram per run (4,000 credits a month across the keys, the finder uses 60 a day)
-POSTS_PER_RUN = int(os.environ.get('POSTS_PER_RUN', '60'))   # leads whose newest posts are read through Apify per run (about $0.015 a lead, 26 Nov test)
-POST_BATCH = 15                                              # profile URLs per Apify call
+POSTS_PER_RUN = int(os.environ.get('POSTS_PER_RUN', '150'))   # leads whose newest posts are read through Apify per run (about $0.015 a lead, 26 Nov test)
+POST_BATCH = 25                                              # profile URLs per Apify call
 FIELDS_OF = {}
 LEAD_TABLES = ('Email and Socials', 'Email Only', 'Socials Only (no email)')
 COLS = {'Owner first name': 'singleLineText', 'Site summary': 'multilineText', 'Latest IG posts': 'multilineText',
@@ -142,7 +142,7 @@ def enrich_one(item):
 
 # ---------------- newest posts on Facebook, Instagram and LinkedIn through Apify (added 26 Nov 2026) ----------------
 _ap_dead = set()
-POSTS_BUDGET_SEC = 14 * 60            # the whole job has 55 minutes and the finder takes about 30; leads not reached keep no marker and go first next run
+POSTS_BUDGET_SEC = 18 * 60            # the whole job has 55 minutes and the finder takes about 30; leads not reached keep no marker and go first next run
 _t0 = [None]
 APIFY_ACTORS = {'fb': 'apify~facebook-posts-scraper', 'li': 'harvestapi~linkedin-profile-posts', 'ig': 'apify~instagram-post-scraper'}
 
@@ -182,13 +182,18 @@ def post_research(items):
     """items: {record id: {'fb','li','ig' urls}}. Returns {record id: fields}. Own posts only; a record with no readable post just gets the marker."""
     found = {k: {} for k in ('fb', 'li', 'ig')}                 # url -> [(date, text)]
     _t0[0] = time.time(); stopped = set()
-    for kind in ('fb', 'li', 'ig'):
+    def one_kind(kind):                                          # the three platforms run side by side (26 Nov: 150 leads a run)
+        got = []
         urls = sorted({v[kind] for v in items.values() if v.get(kind)})
         for k in range(0, len(urls), POST_BATCH):
             if time.time() - _t0[0] > POSTS_BUDGET_SEC:
                 stopped.add(kind); break
-            chunk = urls[k:k + POST_BATCH]
-            data = apify_run(kind, chunk)
+            got.append(apify_run(kind, urls[k:k + POST_BATCH]))
+        return kind, got
+    with cf.ThreadPoolExecutor(3) as ex:
+        results = list(ex.map(one_kind, ('fb', 'li', 'ig')))
+    for kind, got in results:
+      for data in got:
             for r in data or []:
                 if r.get('error'):
                     continue
@@ -230,6 +235,8 @@ def post_research(items):
             nd, nm = max(newest)
             f['Newest post platform'] = nm
             f['Newest post date'] = nd
+        if newest and str(v.get('drafted', '')).startswith('skipped') and (dt.date.today() - dt.date.fromisoformat(max(newest)[0])).days <= 60:
+            f['Drafted to'] = ''                                 # the writer skipped it before these posts existed: put it back in the writer's queue
         if any(v.get(k) for k in stopped):
             continue                                         # a platform was not reached in time: leave the lead unmarked for the next run
         f['Posts researched on'] = dt.date.today().isoformat()
@@ -242,7 +249,7 @@ def posts_queue(base, tids):
     q = {}
     for name, tid in tids.items():
         have = FIELDS_OF.get(name, set())
-        want = [c for c in ('Instagram', 'Facebook', 'LinkedIn', 'Latest IG posts', 'Posts researched on') if c in have]
+        want = [c for c in ('Instagram', 'Facebook', 'LinkedIn', 'Latest IG posts', 'Posts researched on', 'Drafted to') if c in have]
         socials = [c for c in ('Facebook', 'LinkedIn', 'Instagram') if c in have]
         if not socials or 'Posts researched on' not in have:
             continue
@@ -250,7 +257,7 @@ def posts_queue(base, tids):
         d = L.at('GET', f'{base}/{tid}', query={'pageSize': min(100, POSTS_PER_RUN), 'fields[]': want, 'filterByFormula': formula})
         for r in d['records']:
             f = r['fields']
-            q[r['id']] = {'t': name, 'fb': f.get('Facebook', ''), 'li': f.get('LinkedIn', ''), 'ig': f.get('Instagram', ''), 'has_ig': bool(f.get('Latest IG posts'))}
+            q[r['id']] = {'t': name, 'fb': f.get('Facebook', ''), 'li': f.get('LinkedIn', ''), 'ig': f.get('Instagram', ''), 'has_ig': bool(f.get('Latest IG posts')), 'drafted': f.get('Drafted to', '')}
     return dict(list(q.items())[:POSTS_PER_RUN])
 
 
