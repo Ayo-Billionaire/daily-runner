@@ -16,7 +16,7 @@ jobs:
   find:
     # PUBLIC REPO: only PUBLIC: count lines reach the log. Lead details go to Airtable only.
     runs-on: ubuntu-24.04
-    timeout-minutes: 55
+    timeout-minutes: 90   # finder ~30 min + enrich + posts (up to 18) + sites; public repo minutes are free
     env:
       AIRTABLE_TOKEN: ${{ secrets.AIRTABLE_TOKEN }}
       TINYFISH_API_KEY: ${{ secrets.TINYFISH_API_KEY }}
