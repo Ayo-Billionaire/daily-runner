@@ -56,15 +56,26 @@ jobs:
           D="$PWD/${V%.tgz}"
           "$D/tailscaled" --tun=userspace-networking --socks5-server=localhost:1055 --state=mem: --socket=/tmp/ts.sock > /tmp/tailscaled.log 2>&1 &
           sleep 4
-          "$D/tailscale" --socket=/tmp/ts.sock up --authkey="$TS_AUTHKEY" --hostname=runner-gh --exit-node="$EXIT" > /tmp/tsup.log 2>&1 || { echo "tailscale up failed"; exit 1; }
-          sleep 4
-          GOT=""
-          for U in "https://api.country.is|country" "https://ipinfo.io/json|country" "https://ipapi.co/json/|country_code" "http://ip-api.com/json/|countryCode"; do
-            URL="${U%%|*}"; KEY="${U##*|}"
-            GOT=$(curl -fsS --max-time 20 --socks5-hostname localhost:1055 "$URL" 2>/dev/null | python3 -c "import sys,json;print(json.load(sys.stdin).get('$KEY',''))" 2>/dev/null || true)
-            [ -n "$GOT" ] && break
+          # 28 Nov: the phone link drops now and then (15 of 20 runs failed here on 26 Nov). Try 3 times over about 2 minutes,
+          # and keep the Tailscale logs in the encrypted run log so the next failure shows its cause.
+          OK=""
+          for TRY in 1 2 3; do
+            "$D/tailscale" --socket=/tmp/ts.sock up --authkey="$TS_AUTHKEY" --hostname=runner-gh --exit-node="$EXIT" --reset > /tmp/tsup.log 2>&1 || echo "tailscale up failed (try $TRY)"
+            sleep 6
+            GOT=""
+            for U in "https://api.country.is|country" "https://ipinfo.io/json|country" "https://ipapi.co/json/|country_code" "http://ip-api.com/json/|countryCode"; do
+              URL="${U%%|*}"; KEY="${U##*|}"
+              GOT=$(curl -fsS --max-time 20 --socks5-hostname localhost:1055 "$URL" 2>/dev/null | python3 -c "import sys,json;print(json.load(sys.stdin).get('$KEY',''))" 2>/dev/null || true)
+              [ -n "$GOT" ] && break
+            done
+            case "$GOT" in "$WANT"*) OK=1; echo "exit node OK (try $TRY)"; break;; esac
+            echo "NOT through the exit node yet (try $TRY)"
+            if [ "$TRY" -lt 3 ]; then sleep 30; fi
           done
-          case "$GOT" in "$WANT"*) echo "exit node OK";; *) echo "NOT through the exit node"; exit 1;; esac
+          if [ -z "$OK" ]; then
+            { echo "== tsup.log"; cat /tmp/tsup.log; echo "== tailscale status"; "$D/tailscale" --socket=/tmp/ts.sock status 2>&1; echo "== netcheck"; "$D/tailscale" --socket=/tmp/ts.sock netcheck 2>&1; echo "== tailscaled.log (last 80)"; tail -80 /tmp/tailscaled.log; } > run.log 2>&1 || true
+            exit 1
+          fi
           { "$D/tailscale" --socket=/tmp/ts.sock ping -c 3 "$EXIT" || true; } > /tmp/tsping.log 2>&1
           echo "DM_PROXY=socks5://localhost:1055" >> "$GITHUB_ENV"
       - name: Send

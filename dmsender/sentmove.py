@@ -17,7 +17,7 @@ import tick
 
 YES = '--yes' in sys.argv
 FIELDS = ['Business', 'City', 'Email', 'Website', 'Instagram', 'Facebook', 'LinkedIn', 'Draft subject', 'Draft email', 'Cold DM',
-          'Approve DM', 'Scheduled on']
+          'Approve DM', 'Scheduled on', 'DM status', 'Do not contact']
 KEEP = ['Business', 'City', 'Email', 'Website', 'Instagram', 'Facebook', 'LinkedIn', 'Draft subject', 'Draft email', 'Cold DM']
 LONG = {'Draft email', 'Cold DM'}
 
@@ -76,7 +76,12 @@ def run():
             continue
         if em and em not in member:
             continue
-        if has_dm and not f.get('Approve DM'):
+        if has_dm and not f.get('Approve DM') and not f.get('Do not contact'):
+            continue
+        # 28 Nov: a lead with Instagram or Facebook but no DM yet waits here for the DM writer routine, which reads only the
+        # lead tables. It moves once the writer marks it skipped, or the coach is marked Do not contact.
+        dm_st = (f.get('DM status') or '').strip()
+        if (f.get('Instagram') or f.get('Facebook')) and not has_dm and not (dm_st.startswith(('skipped', 'stopped')) or f.get('Do not contact')):
             continue
         chan = '+'.join(x for x, on in (('email', bool(em)), ('DM', has_dm)) if on)
         camp, launched = member.get(em, ('', ''))

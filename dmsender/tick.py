@@ -112,12 +112,13 @@ def run_tick():
         setup_columns()
         return
     a = CFG['airtable']
-    fields = ['Business', 'City', 'Email', 'Draft subject', 'Draft email', 'Cold DM', 'Instagram', 'Facebook', 'Approve', 'Scheduled on']
+    fields = ['Business', 'City', 'Email', 'Draft subject', 'Draft email', 'Cold DM', 'Instagram', 'Facebook', 'Approve', 'Scheduled on',
+              'DM status', 'Do not contact']   # 28 Nov: the DM approval step (dmapprove.py) reuses these rows, no extra reads
     rows, calls = airtable_rows(fields)
     todo = [r for r in rows if r['f'].get('Approve') and not r['f'].get('Scheduled on')]
     log('ticked and not yet scheduled:', len(todo), '| Airtable calls', calls)
     if not todo:
-        return
+        return rows
     todo = todo[:MAX_PER_RUN]
 
     s, camp = lumina('GET', f'/api/campaigns/{CAMPAIGN}')
@@ -156,7 +157,7 @@ def run_tick():
         for p in plan:
             if p['note']:
                 log('note:', p['note'][0][:60])
-        return
+        return rows
 
     # 1. emails into Lumina
     ok_email = {}
@@ -229,17 +230,32 @@ def run_tick():
     log('rows marked scheduled:', done, '| failed', len(failed), '| left alone', len(plan) - done - len(failed))
     if failed:
         raise RuntimeError(f'{len(failed)} rows failed: ' + '; '.join(x[1] for x in failed[:5]))
+    return rows
 
 
 def main():
-    run_tick()
-    if YES and '--setup' not in sys.argv:
-        err = None
+    if '--setup' in sys.argv:
+        return run_tick()
+    err = None
+    try:
+        import replies    # 28 Nov: a coach who replied to an email is marked Do not contact, so no DM goes out
+        replies.run(lumina) if YES else log('DRY RUN: replies check skipped')
+    except Exception as e:
+        err = e
+        print('PUBLIC: replies check failed:', type(e).__name__, flush=True)
+    rows = run_tick()
+    try:
+        import dmapprove  # 28 Nov: DMs approved on the phone page, or untouched for 12 hours, go to the sender's list
+        dmapprove.run(rows or [], YES)
+    except Exception as e:
+        err = err or e
+        print('PUBLIC: DM approval failed:', type(e).__name__, flush=True)
+    if YES:
         try:
             import mover      # 24 Nov: emails approved in the Lumina holding list go into the live campaign (dry unless mover.live exists)
             mover.run()
         except Exception as e:   # the Sent move below must still run
-            err = e
+            err = err or e
             print('PUBLIC: mover failed:', type(e).__name__, flush=True)
         import sentmove   # after every tick: leads whose channels are all done move to the Sent table
         sentmove.run()

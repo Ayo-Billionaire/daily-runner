@@ -1,9 +1,9 @@
 """Once a day: push pending Approve DM ticks to Airtable, then pull the unsent DM queue.
 Airtable free plan = 1,000 calls a month, so this is the ONLY place that reads the base (about 4 to 8 calls)."""
 import re, sys
-from common import CFG, load, save, commit, airtable_rows, airtable_tick, email, run_link, daily_cap, today
+from common import CFG, _at, load, save, commit, airtable_rows, airtable_tick, email, run_link, daily_cap, today
 
-FIELDS = ['Business', 'Cold DM', 'Approve DM', 'Do not contact', 'Instagram', 'Facebook']
+FIELDS = ['Business', 'Email', 'Cold DM', 'Approve DM', 'Do not contact', 'Instagram', 'Facebook']
 
 
 def platforms_of(f):
@@ -25,9 +25,45 @@ def ticks_due(rows, sent):
     return due
 
 
+def replied_keys():
+    """28 Nov: everyone in the Replied Yes / Replied No tables, plus every email address Lumina says replied (state from
+    replies.py), so a coach who answered on any channel never gets a DM. Two Airtable reads a day."""
+    a = CFG['airtable']
+    keys, calls = set(), 0
+    norm = lambda u: (u or '').strip().lower().rstrip('/').split('?')[0]
+    try:
+        tables = {t['name']: t['id'] for t in _at('GET', f"meta/bases/{a['base']}/tables")['tables']}
+        calls += 1
+        for name in ('Replied Yes', 'Replied No'):
+            if name not in tables:
+                continue
+            offset = None
+            while True:
+                q = {'pageSize': 100, 'fields[]': ['Email', 'Instagram', 'Facebook', 'Original record ID']}
+                if offset:
+                    q['offset'] = offset
+                j = _at('GET', f"{a['base']}/{tables[name]}", query=q)
+                calls += 1
+                for r in j['records']:
+                    f = r['fields']
+                    for k in ('Email', 'Instagram', 'Facebook', 'Original record ID'):
+                        if f.get(k):
+                            keys.add(norm(f[k]))
+                offset = j.get('offset')
+                if not offset:
+                    break
+    except Exception as e:
+        print('replied tables read failed:', type(e).__name__)
+    keys |= set(load('replies.json', {}).get('emails', []))
+    keys.discard('')
+    return keys, calls, norm
+
+
 def main():
     sent = load('sent.json', {})
     rows, c2 = airtable_rows(FIELDS)
+    replied, c3, norm = replied_keys()
+    c2 += c3
     due = ticks_due(rows, sent)
     ok, c1 = airtable_tick(due) if due else (set(), 0)
     missing = [rid for _, rid in due if rid not in ok]
@@ -35,6 +71,7 @@ def main():
         raise RuntimeError(f'{len(missing)} Approve DM ticks did not read back: {missing[:5]}')
     ticked = len(ok)
     queue, skipped, waiting = [], [], []
+    n_replied = 0
     approved = set(load('approved.json', []))
     for r in rows:
         f = r['f']
@@ -42,6 +79,9 @@ def main():
         done_here = any(v.get('rid') == r['id'] for v in sent.values())
         # A row the owner ticked by hand (sent manually) is finished; one the sender started keeps its other platform.
         if not dm or f.get('Do not contact') or (f.get('Approve DM') and not done_here):
+            continue
+        if replied & {norm(f.get(k)) for k in ('Email', 'Instagram', 'Facebook')} or r['id'] in replied:
+            n_replied += 1   # counted, not alerted: the owner already has their reply
             continue
         plats = [(p, u) for p, u in platforms_of(f) if f"{r['id']}:{p}" not in sent]
         if not plats:
@@ -65,7 +105,7 @@ def main():
     usage[month] = usage.get(month, 0) + c1 + c2
     save('airtable_calls.json', usage)
     commit(f'sync {today()}: {len(queue)} queued, {ticked} ticked')
-    print(f'PUBLIC: ticked {ticked}, queued {len(queue)}, waiting {len(waiting)}, skipped {len(skipped)}')
+    print(f'PUBLIC: ticked {ticked}, queued {len(queue)}, waiting {len(waiting)}, skipped {len(skipped)}, replied (no DM) {n_replied}')
     print(f'ticked {ticked}, queued {len(queue)}, waiting for go {len(waiting)}, skipped {len(skipped)}, airtable calls this month by sender {usage[month]}')
     cap = daily_cap()
     nco = len({i['id'] for i in queue})
