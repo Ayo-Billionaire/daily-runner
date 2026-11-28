@@ -17,8 +17,8 @@ import tick
 
 YES = '--yes' in sys.argv
 FIELDS = ['Business', 'City', 'Email', 'Website', 'Instagram', 'Facebook', 'LinkedIn', 'Draft subject', 'Draft email', 'Cold DM',
-          'Approve DM', 'Scheduled on', 'DM status', 'Do not contact']
-KEEP = ['Business', 'City', 'Email', 'Website', 'Instagram', 'Facebook', 'LinkedIn', 'Draft subject', 'Draft email', 'Cold DM']
+          'Approve DM', 'Scheduled on', 'DM status', 'Do not contact', 'Version', 'DM version']
+KEEP = ['Business', 'City', 'Email', 'Website', 'Instagram', 'Facebook', 'LinkedIn', 'Draft subject', 'Draft email', 'Cold DM', 'Version', 'DM version']
 LONG = {'Draft email', 'Cold DM'}
 
 

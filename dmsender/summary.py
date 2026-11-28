@@ -44,3 +44,10 @@ if __name__ == '__main__':
     except Exception as e:
         email('DM sender ERROR: daily summary failed', f'{type(e).__name__}: {e}\n\nRun: {run_link()}')
         raise
+    try:   # 28 Nov: on Mondays, also the reply table by wording and the yes count
+        import datetime as _dt
+        if _dt.datetime.now(_dt.timezone.utc).weekday() == 0:
+            import weekly
+            weekly.run()
+    except Exception as e:
+        print('PUBLIC: weekly table failed:', type(e).__name__)
