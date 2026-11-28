@@ -135,6 +135,11 @@ def run():
         return
 
     s, camp = tick.lumina('GET', f'/api/campaigns/{tick.CAMPAIGN}')
+    if s == 200 and camp.get('status') == 'paused':
+        # 28 Nov 2026 (owner): campaign paused while the domain gets out of Gmail spam. Approved emails stay in the holding
+        # list, untouched, and move on the first tick after the campaign is active again.
+        log('campaign paused: nothing moved,', len(approved), 'approved emails wait in the holding list')
+        return
     if s != 200 or camp.get('status') != 'active':
         raise RuntimeError(f'target campaign not readable or not active ({s})')
     list_id = camp['leadListIds'][0]
