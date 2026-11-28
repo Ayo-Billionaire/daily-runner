@@ -51,7 +51,7 @@ def gate(text):
     body = re.sub(r'"[^"]*"', '', low).split(',', 1)[-1]
     if re.search(r'\b(they|them|their|coaches|owners)\b', re.sub(r'\bfive coaches\b', '', body)):
         return 'talks about they or coaches, must say you'
-    if not re.search(r'\b(instagram|facebook|linkedin|website|blog)\b', paras[1].lower()):
+    if not re.search(r'\b(instagram|facebook|linkedin|website|blog|about page)\b', paras[1].lower()):
         return 'opening must name where the post was'
     ok, hits = banned.check(t)
     if not ok:
